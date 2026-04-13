@@ -1,0 +1,18 @@
+# Build output
+mcp/asynkor-mcp
+client/dist/
+client/node_modules/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# Config with secrets
+.asynkor.json
+.coframe.json
+.env
+
+# OS
+.DS_Store
+Thumbs.db

@@ -1,0 +1,51 @@
+name: Bug report
+description: Report a bug with Asynkor
+labels: ["bug"]
+body:
+  - type: textarea
+    id: description
+    attributes:
+      label: Describe the bug
+      placeholder: What happened? What did you expect?
+    validations:
+      required: true
+  - type: dropdown
+    id: component
+    attributes:
+      label: Component
+      options:
+        - MCP Server (Go)
+        - MCP Client (npm)
+        - Leasing / coordination
+        - Dashboard
+        - CLI (init / login)
+        - Other
+    validations:
+      required: true
+  - type: dropdown
+    id: ide
+    attributes:
+      label: IDE / Agent
+      options:
+        - Claude Code
+        - Cursor
+        - Windsurf
+        - VS Code (Copilot)
+        - JetBrains
+        - Zed
+        - Codex CLI
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Call asynkor_start with paths=...
+        2. ...
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs
+      render: shell

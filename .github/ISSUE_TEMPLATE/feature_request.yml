@@ -1,0 +1,30 @@
+name: Feature request
+description: Suggest a feature or improvement
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      placeholder: What's the pain point? What workflow is broken or slow?
+    validations:
+      required: true
+  - type: textarea
+    id: solution
+    attributes:
+      label: Proposed solution
+      placeholder: How should it work?
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Leasing / coordination
+        - Team memory
+        - Dashboard
+        - CLI / setup
+        - IDE integration
+        - Self-hosting
+        - Other
