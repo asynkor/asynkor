@@ -1,6 +1,6 @@
 <p align="center">
   <a href="https://asynkor.com">
-    <img src="media/asynkor-logo.png" width="160" alt="Asynkor" />
+    <img src="media/asynkor-logo.png?v=2" width="160" alt="Asynkor" />
   </a>
 </p>
 
