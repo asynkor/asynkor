@@ -66,12 +66,24 @@ type PersistentFollowup struct {
 	ParentPlan  string `json:"parent_plan,omitempty"`
 }
 
+type ProjectContext struct {
+	Instructions   string `json:"instructions"`
+	VersionID      string `json:"versionId,omitempty"`
+	Version        int    `json:"version"`
+	Content        string `json:"content"`
+	Summary        string `json:"summary,omitempty"`
+	UpdatedBy      string `json:"updatedBy,omitempty"`
+	UpdatedByAgent string `json:"updatedByAgent,omitempty"`
+	UpdatedAt      string `json:"updatedAt,omitempty"`
+}
+
 type TeamContext struct {
-	Rules         []Rule               `json:"rules"`
-	Memories      []Memory             `json:"memories"`
-	Zones         []Zone               `json:"zones"`
-	RecentWorks   []CompletedWork      `json:"recent_works,omitempty"`
-	OpenFollowups []PersistentFollowup `json:"open_followups,omitempty"`
+	Rules          []Rule               `json:"rules"`
+	Memories       []Memory             `json:"memories"`
+	Zones          []Zone               `json:"zones"`
+	RecentWorks    []CompletedWork      `json:"recent_works,omitempty"`
+	OpenFollowups  []PersistentFollowup `json:"open_followups,omitempty"`
+	ProjectContext *ProjectContext      `json:"projectContext,omitempty"`
 }
 
 type Store struct {
@@ -129,11 +141,34 @@ func (s *Store) Get(ctx context.Context, teamID string) *TeamContext {
 	}
 
 	s.mu.Lock()
-	if len(s.cache) > 1000 {
+	if len(s.cache) > 500 {
 		now := time.Now()
 		for k, v := range s.cache {
 			if now.Sub(v.fetchedAt) > time.Hour {
 				delete(s.cache, k)
+			}
+		}
+		// Hard limit: if still over 500 after expiry sweep, evict oldest.
+		if len(s.cache) > 500 {
+			type entry struct {
+				key       string
+				fetchedAt time.Time
+			}
+			entries := make([]entry, 0, len(s.cache))
+			for k, v := range s.cache {
+				entries = append(entries, entry{key: k, fetchedAt: v.fetchedAt})
+			}
+			// Sort by fetchedAt ascending (oldest first).
+			for i := 0; i < len(entries); i++ {
+				for j := i + 1; j < len(entries); j++ {
+					if entries[j].fetchedAt.Before(entries[i].fetchedAt) {
+						entries[i], entries[j] = entries[j], entries[i]
+					}
+				}
+			}
+			toDelete := len(s.cache) - 500
+			for _, e := range entries[:toDelete] {
+				delete(s.cache, e.key)
 			}
 		}
 	}
@@ -165,6 +200,47 @@ func (s *Store) fetch(teamID string) (*TeamContext, error) {
 		return nil, fmt.Errorf("decode context: %w", err)
 	}
 	return &tc, nil
+}
+
+func (s *Store) UpdateProjectContext(teamID, content, summary, agentSession string) (*ProjectContext, error) {
+	body := map[string]any{
+		"content":       content,
+		"summary":       summary,
+		"agent_session": agentSession,
+	}
+	data, _ := json.Marshal(body)
+
+	req, err := http.NewRequest(http.MethodPost,
+		fmt.Sprintf("%s/internal/teams/%s/project-context", s.javaURL, url.PathEscape(teamID)),
+		bytes.NewReader(data))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Internal-Token", s.internalToken)
+
+	resp, err := s.client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("update project context: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 300 {
+		b, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("update project context %d: %s", resp.StatusCode, b)
+	}
+
+	var pc ProjectContext
+	if err := json.NewDecoder(resp.Body).Decode(&pc); err != nil {
+		return nil, fmt.Errorf("decode project context: %w", err)
+	}
+
+	// Invalidate cache so the next briefing reads the new version.
+	s.mu.Lock()
+	delete(s.cache, teamID)
+	s.mu.Unlock()
+
+	return &pc, nil
 }
 
 func (s *Store) CreateMemory(teamID, content string, paths, tags []string, agentSession string) error {

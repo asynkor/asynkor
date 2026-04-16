@@ -22,7 +22,10 @@ func main() {
 	cfg := config.Load()
 
 	if cfg.InternalToken == "" || cfg.InternalToken == "change-me-internal-token" {
-		log.Println("WARNING: INTERNAL_TOKEN is not set or uses default value. Set a strong token for production!")
+		log.Fatal("FATAL: INTERNAL_TOKEN is not set or uses the insecure default. Generate one with: openssl rand -hex 32")
+	}
+	if len(cfg.InternalToken) < 16 {
+		log.Fatal("FATAL: INTERNAL_TOKEN is too short (minimum 16 characters). Generate one with: openssl rand -hex 32")
 	}
 
 	redisClient, err := redisstore.New(cfg.RedisURL)

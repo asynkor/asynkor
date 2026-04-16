@@ -392,6 +392,28 @@ func (s *Server) registerTools(mcpServer *server.MCPServer) {
 		),
 		s.handleLeaseWait,
 	)
+
+	mcpServer.AddTool(
+		mcp.NewTool("asynkor_context",
+			mcp.WithDescription("Read the team's long-term project context — the single versioned markdown doc that captures project structure, active repos, deployment/testing credentials (or references), configurations, and anything else the team owner has decided belongs in the persistent project brain. The response always echoes the owner-written instructions field; read them before considering any update. This tool is read-only."),
+			mcp.WithReadOnlyHintAnnotation(true),
+		),
+		s.handleContext,
+	)
+
+	mcpServer.AddTool(
+		mcp.NewTool("asynkor_context_update",
+			mcp.WithDescription("Write a new version of the long-term project context. Pass the FULL new content — versions are atomic, not patches. Always read asynkor_context first and follow the owner's instructions field (returned in the response) to decide what belongs here. Use this for durable project-level knowledge, not session-specific notes (use asynkor_park for those)."),
+			mcp.WithString("content",
+				mcp.Description("The full new markdown content for the long-term context doc. Max 200000 chars."),
+				mcp.Required(),
+			),
+			mcp.WithString("summary",
+				mcp.Description("Short one-line description of what changed in this version (shown in the version history)."),
+			),
+		),
+		s.handleContextUpdate,
+	)
 }
 
 func (s *Server) registerResources(mcpServer *server.MCPServer) {

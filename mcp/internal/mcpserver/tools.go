@@ -117,10 +117,34 @@ func (s *Server) handleBriefing(ctx context.Context, _ mcp.CallToolRequest) (*mc
 	sb.WriteString(fmt.Sprintf("Team: %s\n", team.TeamSlug))
 
 	tc := s.teamCtx.Get(ctx, team.TeamID)
-	contextRequired := len(tc.Memories) == 0
+
+	// Long-term project context — the owner-curated project brain. Shown
+	// first so every agent inherits it before anything else.
+	pc := tc.ProjectContext
+	if pc != nil && pc.Instructions != "" {
+		sb.WriteString("\nOwner instructions for long-term context:\n")
+		sb.WriteString(pc.Instructions + "\n")
+	}
+	if pc != nil && pc.Content != "" {
+		sb.WriteString(fmt.Sprintf("\nLong-term project context (v%d", pc.Version))
+		if pc.UpdatedAt != "" {
+			sb.WriteString(", updated " + relativeTime(pc.UpdatedAt))
+		}
+		sb.WriteString("):\n")
+		sb.WriteString(pc.Content)
+		if !strings.HasSuffix(pc.Content, "\n") {
+			sb.WriteString("\n")
+		}
+		sb.WriteString("\nTo update: call asynkor_context_update with the new full content and a short summary. Follow the owner instructions above.\n")
+	}
+
+	// CONTEXT REQUIRED fires when both the long-term doc AND the memory
+	// staging feed are empty — brand-new team with nothing to inherit.
+	longTermEmpty := pc == nil || pc.Content == ""
+	contextRequired := longTermEmpty && len(tc.Memories) == 0
 
 	if contextRequired {
-		sb.WriteString("\n⚠ CONTEXT REQUIRED: Long-term context is empty. Before starting any work, you must scan the codebase and populate context by calling asynkor_remember with key architectural decisions, conventions, and patterns. Read the README, key config files, and directory structure first.\n")
+		sb.WriteString("\n⚠ CONTEXT REQUIRED: Long-term context is empty. Before starting any work, scan the codebase (README, directory structure, key config files, recent git history) and populate the long-term project context — either by calling asynkor_context_update with the full initial doc, or by capturing individual insights via asynkor_remember.\n")
 	}
 
 	if len(active) == 0 {
@@ -317,15 +341,18 @@ func (s *Server) handleStart(ctx context.Context, req mcp.CallToolRequest) (*mcp
 
 	// Refuse if long-term context is empty — force the agent to scan first.
 	// Only enforce when we can confirm the context was fetched (team has rules
-	// or zones, proving the Java backend is reachable).
+	// or zones or prior work, proving the Java backend is reachable). Long-term
+	// context is the project_context_versions doc; memories are a staging feed
+	// that also counts so existing teams aren't suddenly blocked.
 	tcCtxEarly := s.teamCtx.Get(ctx, team.TeamID)
-	contextFetched := len(tcCtxEarly.Rules) > 0 || len(tcCtxEarly.Zones) > 0 || len(tcCtxEarly.Memories) > 0 || len(tcCtxEarly.RecentWorks) > 0
-	if contextFetched && len(tcCtxEarly.Memories) == 0 {
+	contextFetched := len(tcCtxEarly.Rules) > 0 || len(tcCtxEarly.Zones) > 0 || len(tcCtxEarly.Memories) > 0 || len(tcCtxEarly.RecentWorks) > 0 || (tcCtxEarly.ProjectContext != nil && tcCtxEarly.ProjectContext.Content != "")
+	longTermEmpty := tcCtxEarly.ProjectContext == nil || tcCtxEarly.ProjectContext.Content == ""
+	if contextFetched && longTermEmpty && len(tcCtxEarly.Memories) == 0 {
 		return toolJSON(map[string]any{
 			"ok":               false,
 			"error":            "context_required",
 			"context_required": true,
-			"message":          "Long-term context is empty. Before starting work, scan the codebase (README, directory structure, key config files, recent git history) and call asynkor_remember for each key insight. Then retry asynkor_start.",
+			"message":          "Long-term context is empty. Before starting work, scan the codebase (README, directory structure, key config files, recent git history) and populate the project context — call asynkor_context_update with the initial doc, or asynkor_remember for individual insights. Then retry asynkor_start.",
 		}), nil
 	}
 
@@ -577,7 +604,10 @@ func (s *Server) handleFinish(ctx context.Context, req mcp.CallToolRequest) (*mc
 	if filesTouchedRaw != "" {
 		for _, p := range strings.Split(filesTouchedRaw, ",") {
 			if t := strings.TrimSpace(p); t != "" {
-				filesTouched = append(filesTouched, t)
+				if len(t) > 4096 {
+					continue
+				}
+				filesTouched = append(filesTouched, filepath.Clean(t))
 			}
 		}
 	}
@@ -588,8 +618,16 @@ func (s *Server) handleFinish(ctx context.Context, req mcp.CallToolRequest) (*mc
 	fileSnapshotsRaw := getArgString(req, "file_snapshots", "")
 	var fileSnapshots map[string]string
 	if fileSnapshotsRaw != "" {
+		if len(fileSnapshotsRaw) > 100*1024*1024 {
+			return toolError("file_snapshots too large (max 100MB)"), nil
+		}
 		if err := json.Unmarshal([]byte(fileSnapshotsRaw), &fileSnapshots); err != nil {
 			return toolError("file_snapshots must be a JSON object mapping file paths to content strings"), nil
+		}
+		for path, content := range fileSnapshots {
+			if len(content) > 10*1024*1024 {
+				return toolError(fmt.Sprintf("file snapshot for %s too large (max 10MB per file)", path)), nil
+			}
 		}
 	}
 
@@ -681,7 +719,10 @@ func (s *Server) handleCheck(ctx context.Context, req mcp.CallToolRequest) (*mcp
 	var paths []string
 	for _, p := range strings.Split(pathsRaw, ",") {
 		if t := strings.TrimSpace(p); t != "" {
-			paths = append(paths, t)
+			if len(t) > 4096 {
+				continue
+			}
+			paths = append(paths, filepath.Clean(t))
 		}
 	}
 	if len(paths) == 0 {
@@ -880,7 +921,10 @@ func (s *Server) handleRemember(ctx context.Context, req mcp.CallToolRequest) (*
 	if pathsRaw != "" {
 		for _, p := range strings.Split(pathsRaw, ",") {
 			if t := strings.TrimSpace(p); t != "" {
-				paths = append(paths, t)
+				if len(t) > 4096 {
+					continue
+				}
+				paths = append(paths, filepath.Clean(t))
 			}
 		}
 	}
@@ -1060,7 +1104,10 @@ func parseCSV(raw string) []string {
 	var out []string
 	for _, p := range strings.Split(raw, ",") {
 		if t := strings.TrimSpace(p); t != "" {
-			out = append(out, t)
+			if len(t) > 4096 {
+				continue
+			}
+			out = append(out, filepath.Clean(t))
 		}
 	}
 	return out
@@ -1518,5 +1565,84 @@ func (s *Server) handleLeaseWait(ctx context.Context, req mcp.CallToolRequest) (
 		resp["message"] = fmt.Sprintf("All %d file(s) acquired. Re-read these files before editing — they may have been modified by the previous holder.", len(acquired))
 	}
 
+	return toolJSON(resp), nil
+}
+
+// ─── Long-term project context ───────────────────────────────────────────────
+
+func (s *Server) handleContext(ctx context.Context, _ mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	if e := getAuthError(ctx); e != "" {
+		return toolError("unauthorized: " + e), nil
+	}
+	team := getTeam(ctx)
+
+	tc := s.teamCtx.Get(ctx, team.TeamID)
+	pc := tc.ProjectContext
+	resp := map[string]any{
+		"ok":           true,
+		"instructions": "",
+		"version":      0,
+		"content":      "",
+	}
+	if pc != nil {
+		resp["instructions"] = pc.Instructions
+		resp["version"] = pc.Version
+		resp["content"] = pc.Content
+		if pc.Summary != "" {
+			resp["summary"] = pc.Summary
+		}
+		if pc.UpdatedAt != "" {
+			resp["updated_at"] = pc.UpdatedAt
+		}
+		if pc.UpdatedBy != "" {
+			resp["updated_by"] = pc.UpdatedBy
+		}
+		if pc.UpdatedByAgent != "" {
+			resp["updated_by_agent"] = pc.UpdatedByAgent
+		}
+	}
+
+	if pc != nil && pc.Instructions != "" {
+		resp["message"] = "Long-term project context retrieved. Follow the owner's instructions above when updating — they describe exactly what belongs here."
+	} else {
+		resp["message"] = "Long-term project context retrieved. No owner instructions are set for this team yet; ask a team admin to fill them in via the dashboard."
+	}
+
+	return toolJSON(resp), nil
+}
+
+func (s *Server) handleContextUpdate(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	if e := getAuthError(ctx); e != "" {
+		return toolError("unauthorized: " + e), nil
+	}
+	team := getTeam(ctx)
+	sessID := getSessionID(ctx)
+
+	content, err := req.RequireString("content")
+	if err != nil {
+		return toolError("content is required"), nil
+	}
+	if len(content) > 200000 {
+		return toolError("content must be 200000 characters or less"), nil
+	}
+	summary := getArgString(req, "summary", "")
+
+	pc, err := s.teamCtx.UpdateProjectContext(team.TeamID, content, summary, sessID)
+	if err != nil {
+		log.Printf("ERROR update project context: %v", err)
+		return toolError("failed to update project context"), nil
+	}
+
+	resp := map[string]any{
+		"ok":           true,
+		"version":      pc.Version,
+		"instructions": pc.Instructions,
+		"content":      pc.Content,
+	}
+	if pc.Instructions != "" {
+		resp["message"] = fmt.Sprintf("Project context saved as v%d. Owner instructions above describe what should live here — re-read them before any future update.", pc.Version)
+	} else {
+		resp["message"] = fmt.Sprintf("Project context saved as v%d. No owner instructions set yet; consider asking an admin to fill them in via the dashboard.", pc.Version)
+	}
 	return toolJSON(resp), nil
 }

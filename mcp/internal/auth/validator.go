@@ -112,6 +112,41 @@ func (v *Validator) Validate(apiKey string) (*TeamContext, error) {
 
 	// Cache successful validation.
 	v.mu.Lock()
+	if len(v.cache) > 10000 {
+		// Evict expired entries first.
+		now := time.Now()
+		for k, c := range v.cache {
+			if now.After(c.expires) {
+				delete(v.cache, k)
+			}
+		}
+		// If still over limit, delete the oldest 1000 entries.
+		if len(v.cache) > 10000 {
+			type entry struct {
+				key     string
+				expires time.Time
+			}
+			entries := make([]entry, 0, len(v.cache))
+			for k, c := range v.cache {
+				entries = append(entries, entry{key: k, expires: c.expires})
+			}
+			// Sort by expiry ascending (oldest first).
+			for i := 0; i < len(entries); i++ {
+				for j := i + 1; j < len(entries); j++ {
+					if entries[j].expires.Before(entries[i].expires) {
+						entries[i], entries[j] = entries[j], entries[i]
+					}
+				}
+			}
+			toDelete := 1000
+			if toDelete > len(entries) {
+				toDelete = len(entries)
+			}
+			for _, e := range entries[:toDelete] {
+				delete(v.cache, e.key)
+			}
+		}
+	}
 	v.cache[apiKey] = &cachedAuth{team: tc, expires: time.Now().Add(authCacheTTL)}
 	v.mu.Unlock()
 

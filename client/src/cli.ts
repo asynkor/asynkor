@@ -1,11 +1,12 @@
 #!/usr/bin/env node
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
-import { loadConfig, resolveConfig, initConfig, ConfigError } from './config.js';
+import { loadConfig, resolveConfig, resolveAllTeams, initConfig, addTeamToConfig, removeTeamFromConfig, ConfigError } from './config.js';
 import { AsynkorMcpProxy } from './proxy.js';
 import readline from 'node:readline';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
+import { z } from 'zod';
 
 const [, , command, ...rest] = process.argv;
 
@@ -37,62 +38,105 @@ const ASYNKOR_CLAUDE_MD = `## Asynkor — team coordination
 
 You are connected to a team via Asynkor. This workflow is MANDATORY, not advisory.
 
-### Required workflow — follow this EVERY session, NO EXCEPTIONS
+**If the asynkor tools are not available** (ToolSearch returns nothing, tool calls fail), STOP and tell the user: "The Asynkor MCP tools are not available — the MCP server may not be running or connected. Should I proceed without coordination?" Do NOT silently skip the workflow.
 
-1. **Session start**: Call \`asynkor_briefing\` FIRST, before anything else. This gives you the full team state: active work, recent decisions, open follow-ups, rules, zones, and team memory. Do not skip this.
+### 1. Connect — read the team brain
 
-2. **Before starting work**: Call \`asynkor_start\` with:
-   - \`plan\`: what you're about to do, in plain language
-   - \`paths\`: comma-separated list of files you expect to touch (critical for overlap detection)
-   - \`followup_id\`: if you're picking up an open follow-up from the briefing
+Call \`asynkor_briefing\` FIRST, before anything else. This gives you:
+- **Active work**: who is doing what, which files are leased
+- **Parked work**: unfinished sessions available for pickup (with \`handoff_id\`)
+- **Active leases**: which files are currently locked by other agents
+- **Recent completions, follow-ups, rules, zones, and team memory**
 
-   **CRITICAL — OVERLAP AND ZONE WARNINGS:**
-   If \`asynkor_start\` returns ANY overlap or zone warning, you MUST:
-   - **STOP IMMEDIATELY.** Do NOT proceed with the work.
-   - **Do NOT say "I'll proceed carefully"** — that defeats the entire purpose.
-   - **Tell the user exactly what the overlap is**: who is working on what, which files conflict.
-   - **Ask the user for an explicit go-ahead** before doing anything else.
-   - **If the user says to wait or change scope, obey.** Adjust your plan and call \`asynkor_start\` again with the new scope.
+If the briefing shows **CONTEXT REQUIRED**, the long-term context is empty. You must scan the codebase first — see step 2.
 
-   This is non-negotiable. Ignoring overlap warnings causes the exact problem Asynkor exists to prevent.
+### 2. First-time setup — populate long-term context
 
-3. **Before editing files**: Call \`asynkor_check\` with the file paths you plan to modify. This returns active overlaps, applicable rules, protected zones, and relevant team memory. If there are warnings, follow the same STOP protocol as step 2.
+If the team brain is empty (no memories), \`asynkor_start\` will refuse to proceed. Before you can start any work, you must:
 
-4. **When you learn something important**: Call \`asynkor_remember\` to save it to the team brain. Good candidates: architectural decisions, gotchas, business logic insights, debugging discoveries, patterns found, conventions established. **Be generous — call this often.** Every memory you save makes the next agent smarter.
+1. Read: README, directory structure, key config files, recent git history
+2. Call \`asynkor_remember\` for each key insight — architecture decisions, conventions, tech stack, gotchas, file ownership patterns
+3. Aim for 5-10 memories that give a future agent enough context to orient in under a minute
 
-5. **When done — MANDATORY, NEVER SKIP**: Call \`asynkor_finish\` with:
-   - \`result\`: what was accomplished
-   - \`learnings\`: key things learned (architectural insights, gotchas, patterns)
-   - \`decisions\`: important choices made and why
-   - \`files_touched\`: comma-separated list of files modified
-   - \`followups\`: JSON array of follow-up tasks for teammates
+This only happens once per team. After the initial scan, every agent inherits the context automatically.
 
-   **You MUST call \`asynkor_finish\` before ending the conversation.** If the user says "thanks" or "done" or stops responding, call \`asynkor_finish\` with whatever you have. Incomplete finish is better than no finish.
+### 3. Start work — declare intent + acquire leases
 
-### Memory — capture aggressively
+Call \`asynkor_start\` with:
+- \`plan\`: what you're about to do, in plain language
+- \`paths\`: comma-separated list of files you expect to touch (**critical** — these become your file leases)
+- \`followup_id\`: if picking up an open follow-up
+- \`handoff_id\`: if resuming a parked work session (inherits the previous agent's plan, progress, and decisions)
 
-Call \`asynkor_remember\` whenever you:
-- Make or discover an architectural decision
-- Find a gotcha or non-obvious behavior
-- Establish a pattern or convention
-- Fix a bug with a non-obvious root cause
-- Learn something about the codebase that would save a future agent time
+**SAVE THE \`work_id\`** from the response. You will need it for \`asynkor_finish\` or \`asynkor_park\` if your session reconnects.
 
-One memory per insight. Short, specific, actionable.
+**On overlap, zone, or lease warnings — STOP:**
+- Do NOT proceed. Tell the user exactly what the conflict is.
+- Ask for explicit go-ahead before continuing.
+- If told to wait or change scope, adjust and call \`asynkor_start\` again.
 
-### Parallel work and sub-agents
+**If the response contains \`action_required\` with blocked leases:**
+- You MUST call \`asynkor_lease_wait\` on the blocked paths before editing those files.
+- Do NOT edit blocked files without acquiring their leases first.
+- After acquiring, RE-READ the files — they may have been changed by the previous holder.
 
-If the briefing shows multiple open follow-ups that can be done in parallel (independent files, no overlap), consider using the Agent tool to spawn sub-agents for each one. Each sub-agent should:
-- Call \`asynkor_start\` with its own plan and paths
-- Do the work
-- Call \`asynkor_remember\` with any learnings
-- Call \`asynkor_finish\` with its results
+### 4. During work — leases protect your files
 
-If a sub-agent's \`asynkor_start\` returns an overlap warning, it MUST stop and surface the conflict — same rules as above, no exceptions.
+Your declared paths are leased automatically at start. If you need to edit additional files not in your original paths:
 
-### Why this matters
+1. Call \`asynkor_check\` with the new paths — see if they're leased by someone else
+2. If free: call \`asynkor_lease_acquire\` to lease them
+3. If leased: call \`asynkor_lease_wait\` to block until they're released (up to 30s, retryable)
+4. **After a wait completes: RE-READ the files before editing.** The previous holder may have changed them.
 
-Every call to \`asynkor_finish\` and \`asynkor_remember\` enriches the team's shared brain. If you skip \`asynkor_finish\` or don't call \`asynkor_remember\`, the next agent starts from scratch on everything you already figured out. That's wasted work for the entire team.`;
+**If the response contains \`file_snapshots\`:** Another agent uploaded the actual file content. **WRITE each snapshot to your local filesystem** before editing — this is the other agent's version of the file. Edit on top of it to avoid merge conflicts.
+
+Leases auto-expire after 5 minutes and are refreshed while your session is active. They're released when you finish, park, or disconnect.
+
+### 5. Capture learnings — feed the team brain
+
+Call \`asynkor_remember\` whenever you discover something a future agent should know:
+- Architectural decisions and why they were made
+- Gotchas, non-obvious behavior, debugging discoveries
+- Patterns, conventions, file ownership
+- Business logic insights
+
+One memory per insight. Short, specific, actionable. The team brain compounds — but only if you write to it.
+
+### 6. End work — finish or park
+
+#### Option A: Work is done → \`asynkor_finish\`
+- \`result\`: what was accomplished (be specific: files modified, behavior changed)
+- \`learnings\`: key things learned
+- \`decisions\`: important choices made and why
+- \`files_touched\`: comma-separated list of files modified
+- \`file_snapshots\`: **REQUIRED for cross-machine coordination.** JSON object mapping each modified file path to its current content. Read each file you modified and include it: \`{"src/api.ts": "<full file content>", ...}\`.
+- \`followups\`: JSON array of tasks for teammates
+
+**You MUST call \`asynkor_finish\` before ending the conversation.** Incomplete finish is better than no finish.
+
+#### Option B: Work is not done → \`asynkor_park\`
+- \`progress\`: what's done and what's left
+- \`notes\`: blockers, dependencies, things to watch out for
+- \`learnings\`: key things learned so far
+- \`decisions\`: choices made and why
+- \`files_touched\`: files modified so far
+
+This releases your leases and saves your context as a **handoff**. The parked work appears in the briefing with a \`handoff_id\` that another agent can use to resume.
+
+### Quick reference
+
+| Tool | When | Key params |
+|------|------|------------|
+| \`asynkor_briefing\` | Session start | — |
+| \`asynkor_remember\` | Learn something | content, paths, tags |
+| \`asynkor_start\` | Begin work | plan, paths, handoff_id, followup_id |
+| \`asynkor_check\` | Before editing files | paths |
+| \`asynkor_lease_acquire\` | Need additional files | paths |
+| \`asynkor_lease_wait\` | File is leased by another agent | paths, timeout_seconds |
+| \`asynkor_finish\` | Work complete | result, learnings, decisions, files_touched, file_snapshots, followups |
+| \`asynkor_park\` | Work incomplete, save for later | progress, notes, learnings, decisions, files_touched |
+| \`asynkor_cancel\` | Clean up stale/orphaned work | work_id |`;
 
 const AUTO_APPROVE_TOOLS = [
   'mcp__asynkor__asynkor_briefing',
@@ -100,20 +144,31 @@ const AUTO_APPROVE_TOOLS = [
   'mcp__asynkor__asynkor_finish',
   'mcp__asynkor__asynkor_check',
   'mcp__asynkor__asynkor_remember',
+  'mcp__asynkor__asynkor_park',
+  'mcp__asynkor__asynkor_lease_acquire',
+  'mcp__asynkor__asynkor_lease_wait',
+  'mcp__asynkor__asynkor_cancel',
+  // read-only; writes to the long-term doc (asynkor_context_update) are
+  // intentionally NOT auto-approved so the owner sees every modification.
+  'mcp__asynkor__asynkor_context',
 ];
 
-interface JoinLinkResponse {
-  team: { slug: string; name: string };
-  api_key: string;
-  server_url: string;
-  setup: {
-    asynkor_json: Record<string, unknown>;
-    mcp_install: string;
-    claude_md: string;
-  };
-}
+const JoinLinkSchema = z.object({
+  team: z.object({ slug: z.string().min(1).max(128), name: z.string().min(1).max(256) }),
+  api_key: z.string().regex(/^cf_(live|test)_[a-f0-9]{64}$/, 'Invalid API key format'),
+  server_url: z.string().url().refine(u => u.startsWith('https://'), { message: 'Server URL must use HTTPS' }),
+  setup: z.object({
+    asynkor_json: z.record(z.unknown()),
+    mcp_install: z.string().max(1024),
+    claude_md: z.string().max(32768),
+  }),
+});
+type JoinLinkResponse = z.infer<typeof JoinLinkSchema>;
 
 async function fetchJoinLink(url: string): Promise<JoinLinkResponse> {
+  if (!url.startsWith('https://')) {
+    throw new Error('Join link must use HTTPS.');
+  }
   const res = await fetch(url, {
     headers: { Accept: 'application/json' },
   });
@@ -124,7 +179,12 @@ async function fetchJoinLink(url: string): Promise<JoinLinkResponse> {
     }
     throw new Error(`Failed to fetch join link (HTTP ${status}).`);
   }
-  return (await res.json()) as JoinLinkResponse;
+  const json = await res.json();
+  const parsed = JoinLinkSchema.safeParse(json);
+  if (!parsed.success) {
+    throw new Error(`Invalid join link response: ${parsed.error.issues.map(i => i.message).join(', ')}`);
+  }
+  return parsed.data;
 }
 
 function writeAsynkorJson(data: Record<string, unknown>): void {
@@ -217,28 +277,30 @@ async function cmdStart(args: string[]): Promise<void> {
   const flags = parseFlags(args);
   if (flags['server-url']) process.env.ASYNKOR_SERVER_URL = flags['server-url'];
   if (flags['api-key']) process.env.ASYNKOR_API_KEY = flags['api-key'];
+  if (flags['team']) process.env.ASYNKOR_TEAM = flags['team'];
 
-  // Use resolveConfig() instead of loadConfig() so we can start even
-  // without a key. The proxy's hot-reload mechanism will detect when
-  // .asynkor.json appears (e.g. after the user runs init in another
-  // terminal) and connect automatically — no Claude Code restart needed.
-  const { config } = resolveConfig();
+  // Use resolveAllTeams() to support multi-team configs. If only one
+  // team is configured, it auto-selects. If multiple teams exist without
+  // an active_team set, the proxy starts disconnected and the AI picks
+  // a team via asynkor_teams/asynkor_switch.
+  const resolved = resolveAllTeams();
 
-  const proxy = new AsynkorMcpProxy(config);
+  const proxy = new AsynkorMcpProxy(resolved.teams, resolved.activeSlug);
 
   let server;
   try {
     server = await proxy.createStdioServer();
   } catch (err) {
-    if (config) {
-      process.stderr.write(`[asynkor] Failed to connect to server at ${config.serverUrl}: ${err}\n`);
+    const activeTeam = resolved.teams.find(t => t.slug === resolved.activeSlug);
+    if (activeTeam) {
+      process.stderr.write(`[asynkor] Failed to connect to server at ${activeTeam.serverUrl}: ${err}\n`);
       process.stderr.write('[asynkor] Make sure the Asynkor server is running.\n');
     }
     // Don't exit — the proxy will retry via scheduleReconnect.
-    // If there was no config, createStdioServer succeeds in disconnected
-    // mode and the proxy waits for config to appear.
-    if (!config) {
+    if (resolved.teams.length === 0) {
       process.stderr.write('[asynkor] Starting in disconnected mode. Tools will return errors until an API key is configured.\n');
+    } else if (!resolved.activeSlug) {
+      process.stderr.write(`[asynkor] ${resolved.teams.length} teams configured, none selected. AI will choose via asynkor_teams/asynkor_switch.\n`);
     } else {
       process.exit(1);
     }
@@ -529,7 +591,7 @@ async function cmdLogin(args: string[]): Promise<void> {
   const serverUrl = flags['server-url'] || process.env.ASYNKOR_SERVER_URL?.trim() || 'https://asynkor.com';
 
   const http = await import('node:http');
-  const { execSync } = await import('node:child_process');
+  const { execFileSync } = await import('node:child_process');
 
   const port = await new Promise<number>((resolve) => {
     const srv = http.createServer();
@@ -548,7 +610,7 @@ async function cmdLogin(args: string[]): Promise<void> {
     const url = new URL(req.url ?? '/', `http://127.0.0.1:${port}`);
 
     if (url.pathname === '/callback') {
-      res.writeHead(200, { 'Content-Type': 'text/html', 'Access-Control-Allow-Origin': '*' });
+      res.writeHead(200, { 'Content-Type': 'text/html' });
       res.end('<html><body><p>Done. You can close this tab.</p></body></html>');
       callbackResolve!(url.searchParams);
     } else {
@@ -568,9 +630,9 @@ async function cmdLogin(args: string[]): Promise<void> {
 
   try {
     const platform = process.platform;
-    if (platform === 'darwin') execSync(`open "${authUrl}"`);
-    else if (platform === 'win32') execSync(`start "" "${authUrl}"`);
-    else execSync(`xdg-open "${authUrl}"`);
+    if (platform === 'darwin') execFileSync('open', [authUrl]);
+    else if (platform === 'win32') execFileSync('cmd', ['/c', 'start', '', authUrl]);
+    else execFileSync('xdg-open', [authUrl]);
   } catch {
     // browser open failed, user can use the printed URL
   }
@@ -587,6 +649,7 @@ async function cmdLogin(args: string[]): Promise<void> {
 
   const apiKey = params.get('api_key');
   const team = params.get('team');
+  const refreshToken = params.get('refresh_token');
 
   if (!apiKey) {
     console.error('Authorization failed — no API key received.');
@@ -604,13 +667,18 @@ async function cmdLogin(args: string[]): Promise<void> {
 
   existing.api_key = apiKey;
   existing.server_url = 'https://mcp.asynkor.com';
+  existing.api_url = serverUrl.replace('mcp.', 'api.').replace(/\/$/, '');
   if (team) existing.team = team;
+  if (refreshToken) existing.refresh_token = refreshToken;
 
-  fs.writeFileSync(configPath, JSON.stringify(existing, null, 2) + '\n');
+  fs.writeFileSync(configPath, JSON.stringify(existing, null, 2) + '\n', { mode: 0o600 });
 
   console.log('');
   console.log(`Logged in${team ? ` (team: ${team})` : ''}`);
   console.log(`API key saved to ${configPath}`);
+  if (refreshToken) {
+    console.log('Refresh token saved — expired keys will be auto-refreshed.');
+  }
   console.log('');
   console.log('Next steps:');
   console.log('  claude mcp add asynkor -- npx @asynkor/mcp start');
@@ -656,6 +724,85 @@ async function cmdStatus(): Promise<void> {
   }
 }
 
+async function cmdTeams(args: string[]): Promise<void> {
+  const sub = args[0];
+  const flags = parseFlags(args.slice(1));
+
+  if (!sub || sub === 'list') {
+    const resolved = resolveAllTeams();
+    if (resolved.teams.length === 0) {
+      console.log('No teams configured.');
+      console.log('Run `asynkor init` or `asynkor login` to set up.');
+      return;
+    }
+    console.log(`Configured teams (${resolved.teams.length}):`);
+    for (const t of resolved.teams) {
+      const active = t.slug === resolved.activeSlug ? ' (active)' : '';
+      const ctx = t.context ? ` — ${t.context}` : '';
+      console.log(`  ${t.slug}${t.name ? ` [${t.name}]` : ''}${active}${ctx}`);
+    }
+    if (!resolved.activeSlug && resolved.teams.length > 1) {
+      console.log('\nNo active team set. Use: asynkor teams switch <slug>');
+    }
+    return;
+  }
+
+  if (sub === 'add') {
+    const apiKey = flags['api-key'] || process.env.ASYNKOR_API_KEY?.trim();
+    const slug = flags['slug'];
+    if (!apiKey || !slug) {
+      console.error('Usage: asynkor teams add --slug <slug> --api-key <key> [--name <name>] [--context <desc>] [--server-url <url>]');
+      process.exit(1);
+    }
+    addTeamToConfig({
+      slug,
+      name: flags['name'],
+      apiKey,
+      serverUrl: flags['server-url'],
+      context: flags['context'],
+    });
+    console.log(`Team "${slug}" added to .asynkor.json`);
+    return;
+  }
+
+  if (sub === 'remove') {
+    const slug = args[1];
+    if (!slug || slug.startsWith('--')) {
+      console.error('Usage: asynkor teams remove <slug>');
+      process.exit(1);
+    }
+    if (removeTeamFromConfig(slug)) {
+      console.log(`Team "${slug}" removed.`);
+    } else {
+      console.error(`Team "${slug}" not found in config.`);
+      process.exit(1);
+    }
+    return;
+  }
+
+  if (sub === 'switch') {
+    const slug = args[1];
+    if (!slug || slug.startsWith('--')) {
+      console.error('Usage: asynkor teams switch <slug>');
+      process.exit(1);
+    }
+    const resolved = resolveAllTeams();
+    if (!resolved.teams.find(t => t.slug === slug)) {
+      console.error(`Team "${slug}" not found. Available: ${resolved.teams.map(t => t.slug).join(', ')}`);
+      process.exit(1);
+    }
+
+    const { setActiveTeamInConfig } = await import('./config.js');
+    setActiveTeamInConfig(slug);
+    console.log(`Active team set to "${slug}".`);
+    return;
+  }
+
+  console.error(`Unknown teams subcommand: ${sub}`);
+  console.error('Usage: asynkor teams [list|add|remove|switch]');
+  process.exit(1);
+}
+
 function printHelp(): void {
   console.log(`
 @asynkor/mcp — Asynkor MCP client
@@ -668,6 +815,10 @@ Usage:
   asynkor init --link <url>         Set up from a one-time join link
   asynkor setup <url>               Set up from a one-time join link (alias)
   asynkor status                    Show current team briefing
+  asynkor teams                     List configured teams
+  asynkor teams add                 Add a team to config
+  asynkor teams remove <slug>       Remove a team from config
+  asynkor teams switch <slug>       Set the active team
   asynkor help                      Show this help
 
 Supported IDEs (--ide flag):
@@ -683,6 +834,23 @@ Supported IDEs (--ide flag):
 Flags for start:
   --server-url <url>      MCP server URL (default: https://mcp.asynkor.com)
   --api-key <key>         API key
+  --team <slug>           Active team (when multiple teams configured)
+
+Flags for teams add:
+  --slug <slug>           Team slug (required)
+  --api-key <key>         API key for the team (required)
+  --name <name>           Display name
+  --context <desc>        Brief description (helps AI choose the right team)
+  --server-url <url>      Override server URL
+
+Multi-team config (.asynkor.json):
+  {
+    "teams": [
+      { "slug": "my-team", "api_key": "cf_live_...", "context": "Main product" },
+      { "slug": "oss-lib", "api_key": "cf_live_...", "context": "Open source CLI" }
+    ],
+    "active_team": "my-team"
+  }
 
 Claude Code setup:
   claude mcp add asynkor -- npx @asynkor/mcp start
@@ -690,7 +858,7 @@ Claude Code setup:
 Environment variables:
   ASYNKOR_API_KEY         API key (used by start, and by init for non-interactive setup)
   ASYNKOR_SERVER_URL      Override server URL (default: https://mcp.asynkor.com)
-  ASYNKOR_TEAM            Optional team slug used by init when ASYNKOR_API_KEY is set
+  ASYNKOR_TEAM            Active team slug (overrides active_team in config)
 `);
 }
 
@@ -721,6 +889,12 @@ switch (command) {
     break;
   case 'status':
     cmdStatus().catch((err) => {
+      console.error(err);
+      process.exit(1);
+    });
+    break;
+  case 'teams':
+    cmdTeams(rest).catch((err) => {
       console.error(err);
       process.exit(1);
     });

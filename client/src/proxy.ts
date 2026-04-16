@@ -13,10 +13,9 @@ import {
   Resource,
 } from '@modelcontextprotocol/sdk/types.js';
 import type { CallToolResult, ReadResourceResult } from '@modelcontextprotocol/sdk/types.js';
-import fs from 'node:fs';
 import os from 'node:os';
-import type { AsynkorConfig } from './config.js';
-import { resolveConfig } from './config.js';
+import type { AsynkorConfig, AsynkorTeam } from './config.js';
+import { resolveAllTeams, updateTeamKeyInConfig } from './config.js';
 
 const RECONNECT_BASE_MS = 3000;
 const MAX_RECONNECT_ATTEMPTS = 10;
@@ -26,6 +25,26 @@ const SUBSCRIBE_POLL_MS = 3000;
 // and negligible compared to the network round-trip of a tool call.
 const CONFIG_CHECK_INTERVAL_MS = 3000;
 
+// Synthetic tools handled locally by the proxy for multi-team support.
+const SYNTHETIC_TOOLS: Tool[] = [
+  {
+    name: 'asynkor_teams',
+    description: 'List all configured teams and show which one is currently active. Each team includes a context description to help you choose the right one. Use this before asynkor_switch when multiple teams are available.',
+    inputSchema: { type: 'object' as const, properties: {} },
+  },
+  {
+    name: 'asynkor_switch',
+    description: 'Switch to a different team. This disconnects from the current team (auto-parking any active work) and reconnects to the selected one. After switching, call asynkor_briefing to orient yourself in the new team context. Finish or park active work before switching when possible.',
+    inputSchema: {
+      type: 'object' as const,
+      properties: {
+        team: { type: 'string', description: 'Team slug to switch to. Use asynkor_teams to see available slugs.' },
+      },
+      required: ['team'],
+    },
+  },
+];
+
 export class AsynkorMcpProxy {
   private goClient: Client | null = null;
   private reconnectAttempts = 0;
@@ -34,6 +53,10 @@ export class AsynkorMcpProxy {
   private cachedResources: Resource[] = [];
   private subscriptions = new Map<string, ReturnType<typeof setInterval>>();
 
+  // Multi-team state
+  private teams: AsynkorTeam[];
+  private activeTeamSlug: string | null;
+
   // Hot-reload state: tracks what we're currently connected with so we
   // can detect changes and reconnect without restarting the process.
   private currentApiKey: string;
@@ -41,12 +64,28 @@ export class AsynkorMcpProxy {
   private lastConfigCheck = 0;
 
   constructor(
-    private cfg: AsynkorConfig | null,
+    teams: AsynkorTeam[],
+    activeTeamSlug: string | null,
     private readonly agentName: string = 'claude-code',
     private readonly agentVersion: string = process.env.CLAUDE_CODE_VERSION ?? 'unknown',
   ) {
-    this.currentApiKey = cfg?.apiKey ?? '';
-    this.currentServerUrl = cfg?.serverUrl ?? 'https://mcp.asynkor.com';
+    this.teams = teams;
+    this.activeTeamSlug = activeTeamSlug;
+
+    const activeTeam = teams.find(t => t.slug === activeTeamSlug);
+    this.currentApiKey = activeTeam?.apiKey ?? '';
+    this.currentServerUrl = activeTeam?.serverUrl ?? 'https://mcp.asynkor.com';
+  }
+
+  /** @deprecated Use the multi-team constructor. Kept for backward compat. */
+  static fromLegacyConfig(cfg: AsynkorConfig | null): AsynkorMcpProxy {
+    if (!cfg) return new AsynkorMcpProxy([], null);
+    const team: AsynkorTeam = {
+      slug: cfg.team || 'default',
+      apiKey: cfg.apiKey,
+      serverUrl: cfg.serverUrl,
+    };
+    return new AsynkorMcpProxy([team], team.slug);
   }
 
   private buildTransport(): SSEClientTransport {
@@ -127,9 +166,17 @@ export class AsynkorMcpProxy {
     if (now - this.lastConfigCheck < CONFIG_CHECK_INTERVAL_MS) return;
     this.lastConfigCheck = now;
 
-    const { config } = resolveConfig();
-    const newKey = config?.apiKey ?? '';
-    const newUrl = config?.serverUrl ?? 'https://mcp.asynkor.com';
+    const resolved = resolveAllTeams();
+    this.teams = resolved.teams;
+
+    // If active team was set via config file, update it
+    if (resolved.activeSlug && resolved.activeSlug !== this.activeTeamSlug) {
+      this.activeTeamSlug = resolved.activeSlug;
+    }
+
+    const activeTeam = this.teams.find(t => t.slug === this.activeTeamSlug);
+    const newKey = activeTeam?.apiKey ?? '';
+    const newUrl = activeTeam?.serverUrl ?? 'https://mcp.asynkor.com';
 
     if (newKey === this.currentApiKey && newUrl === this.currentServerUrl) {
       return; // no change
@@ -138,7 +185,6 @@ export class AsynkorMcpProxy {
     const hadKey = !!this.currentApiKey;
     this.currentApiKey = newKey;
     this.currentServerUrl = newUrl;
-    this.cfg = config;
 
     if (!newKey) {
       process.stderr.write('[asynkor] Config changed but API key is empty. Waiting...\n');
@@ -204,10 +250,189 @@ export class AsynkorMcpProxy {
     }
   }
 
+  // ── Synthetic tool handlers (multi-team) ──────────────────────────
+
+  private handleTeamsList(): CallToolResult {
+    const teamList = this.teams.map(t => ({
+      slug: t.slug,
+      name: t.name || t.slug,
+      context: t.context || '(no context set — set via .asynkor.json teams[].context)',
+      active: t.slug === this.activeTeamSlug,
+      server_url: t.serverUrl,
+    }));
+
+    let instructions: string;
+    if (this.teams.length === 0) {
+      instructions = 'No teams configured. Run `npx @asynkor/mcp init` or `npx @asynkor/mcp login` to set up.';
+    } else if (this.teams.length === 1) {
+      instructions = 'Only one team configured — it is auto-selected.';
+    } else {
+      instructions = 'Call asynkor_switch with the team slug to switch. After switching, call asynkor_briefing to orient yourself.';
+    }
+
+    return {
+      content: [{
+        type: 'text' as const,
+        text: JSON.stringify({
+          teams: teamList,
+          active_team: this.activeTeamSlug,
+          total: this.teams.length,
+          instructions,
+        }),
+      }],
+    };
+  }
+
+  private async handleTeamSwitch(args: Record<string, unknown> | undefined): Promise<CallToolResult> {
+    const slug = (args?.team as string)?.trim();
+    if (!slug) {
+      return {
+        content: [{ type: 'text' as const, text: JSON.stringify({
+          error: 'missing_team',
+          message: 'The "team" parameter is required. Call asynkor_teams to see available slugs.',
+        }) }],
+        isError: true,
+      };
+    }
+
+    const team = this.teams.find(t => t.slug === slug);
+    if (!team) {
+      return {
+        content: [{ type: 'text' as const, text: JSON.stringify({
+          error: 'team_not_found',
+          message: `Team "${slug}" not found.`,
+          available: this.teams.map(t => t.slug),
+        }) }],
+        isError: true,
+      };
+    }
+
+    if (slug === this.activeTeamSlug && this.goClient) {
+      return {
+        content: [{ type: 'text' as const, text: JSON.stringify({
+          status: 'already_active',
+          team: slug,
+          name: team.name || slug,
+          message: `Already connected to team "${team.name || slug}". Call asynkor_briefing to see the team state.`,
+        }) }],
+      };
+    }
+
+    // Disconnect from current team (Go server will auto-park active work)
+    if (this.goClient) {
+      process.stderr.write(`[asynkor] Switching from "${this.activeTeamSlug}" to "${slug}"...\n`);
+      try {
+        await this.goClient.close();
+      } catch {}
+      this.goClient = null;
+    }
+
+    this.activeTeamSlug = slug;
+    this.currentApiKey = team.apiKey;
+    this.currentServerUrl = team.serverUrl;
+    this.reconnectAttempts = 0;
+
+    try {
+      this.goClient = await this.connectToGoServer();
+      this.cachedTools = (await this.goClient.listTools()).tools;
+      try {
+        this.cachedResources = (await this.goClient.listResources()).resources ?? [];
+      } catch {
+        this.cachedResources = [];
+      }
+      process.stderr.write(`[asynkor] Connected to team "${slug}". ${this.cachedTools.length} tools.\n`);
+
+      return {
+        content: [{ type: 'text' as const, text: JSON.stringify({
+          status: 'switched',
+          team: slug,
+          name: team.name || slug,
+          context: team.context,
+          tools_available: this.cachedTools.length,
+          next_step: 'Call asynkor_briefing to see the team state and orient yourself.',
+        }) }],
+      };
+    } catch (err) {
+      process.stderr.write(`[asynkor] Failed to connect to team "${slug}": ${err}\n`);
+      this.scheduleReconnect();
+      return {
+        content: [{ type: 'text' as const, text: JSON.stringify({
+          error: 'connection_failed',
+          team: slug,
+          message: `Failed to connect to team "${slug}": ${err}. Will retry in background.`,
+        }) }],
+        isError: true,
+      };
+    }
+  }
+
+  /**
+   * Attempt to refresh an expired API key using the stored refresh token.
+   * Flow: refresh JWT → create new API key → update config on disk → reconnect.
+   * Returns the new API key on success, null on failure.
+   */
+  private async refreshApiKey(team: AsynkorTeam): Promise<string | null> {
+    if (!team.refreshToken) return null;
+
+    const apiUrl = team.apiUrl || team.serverUrl.replace('mcp.', 'api.');
+    if (!apiUrl.startsWith('https://')) {
+      process.stderr.write(`[asynkor] Refusing token refresh: API URL must use HTTPS (got ${apiUrl}).\n`);
+      return null;
+    }
+    process.stderr.write(`[asynkor] API key invalid. Attempting token refresh for team "${team.slug}"...\n`);
+
+    try {
+      // 1. Refresh JWT using the stored refresh token
+      const refreshRes = await fetch(`${apiUrl}/v1/auth/refresh`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ refresh_token: team.refreshToken }),
+      });
+
+      if (!refreshRes.ok) {
+        process.stderr.write(`[asynkor] Token refresh failed (HTTP ${refreshRes.status}). Run \`asynkor login\` to re-authenticate.\n`);
+        return null;
+      }
+
+      const { accessToken, refreshToken: newRefreshToken } = await refreshRes.json() as {
+        accessToken: string;
+        refreshToken: string;
+      };
+
+      // 2. Create a new API key using the fresh JWT
+      const keyRes = await fetch(`${apiUrl}/v1/teams/${team.slug}/api-keys`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${accessToken}`,
+        },
+        body: JSON.stringify({ label: `Auto-refresh (${os.hostname()})` }),
+      });
+
+      if (!keyRes.ok) {
+        process.stderr.write(`[asynkor] Failed to create new API key (HTTP ${keyRes.status}). Run \`asynkor login\`.\n`);
+        return null;
+      }
+
+      const { key: newApiKey } = await keyRes.json() as { key: string };
+
+      // 3. Update config on disk so the new key persists across restarts
+      team.refreshToken = newRefreshToken;
+      updateTeamKeyInConfig(team.slug, newApiKey, newRefreshToken);
+
+      process.stderr.write(`[asynkor] API key refreshed successfully for team "${team.slug}".\n`);
+      return newApiKey;
+    } catch (err) {
+      process.stderr.write(`[asynkor] Token refresh error: ${err}. Run \`asynkor login\` to re-authenticate.\n`);
+      return null;
+    }
+  }
+
   async createStdioServer(): Promise<Server> {
-    // If we have a config, connect now. If not (no key yet), the server
-    // starts in disconnected mode and connects when checkConfigReload()
-    // detects the key appearing in .asynkor.json.
+    // If we have an active team with a key, connect now. If not (no key
+    // yet, or multiple teams with none selected), the server starts in
+    // disconnected mode and connects when the AI calls asynkor_switch or
+    // when checkConfigReload() detects a key appearing in .asynkor.json.
     if (this.currentApiKey) {
       this.goClient = await this.connectToGoServer();
       this.cachedTools = (await this.goClient.listTools()).tools;
@@ -216,6 +441,10 @@ export class AsynkorMcpProxy {
       } catch {
         this.cachedResources = [];
       }
+    } else if (this.teams.length > 1) {
+      process.stderr.write(
+        `[asynkor] ${this.teams.length} teams configured, none selected. AI will choose via asynkor_teams/asynkor_switch.\n`,
+      );
     } else {
       process.stderr.write(
         '[asynkor] No API key found. Waiting for .asynkor.json to appear...\n' +
@@ -244,25 +473,60 @@ export class AsynkorMcpProxy {
 
     server.setRequestHandler(ListToolsRequestSchema, async () => {
       await this.checkConfigReload();
+      const serverTools = this.cachedTools;
       if (this.goClient) {
         try {
           const result = await this.goClient.listTools();
           this.cachedTools = result.tools;
-          return result;
         } catch {
           // fall through to cached
         }
       }
-      return { tools: this.cachedTools };
+      // Always include synthetic tools so the AI can discover team switching
+      // even when not connected to a Go server.
+      const allTools = this.teams.length > 1
+        ? [...this.cachedTools, ...SYNTHETIC_TOOLS]
+        : this.cachedTools;
+      return { tools: allTools };
     });
 
     server.setRequestHandler(CallToolRequestSchema, async (request) => {
       const { name, arguments: args } = request.params;
 
+      // Synthetic tools are handled locally — they work even when
+      // not connected to a Go server.
+      if (name === 'asynkor_teams') {
+        return this.handleTeamsList();
+      }
+      if (name === 'asynkor_switch') {
+        const result = await this.handleTeamSwitch(args);
+        // Re-register notification forwarding after reconnect
+        setupNotificationForwarding();
+        return result;
+      }
+
       // Hot-reload: pick up new config before the tool call. If the key
       // just appeared (e.g. user ran init mid-session), this is where
       // we connect for the first time.
       await this.checkConfigReload();
+
+      // If multiple teams and none selected, guide the AI to pick one
+      if (this.teams.length > 1 && !this.activeTeamSlug) {
+        const teamSummaries = this.teams.map(t =>
+          `• ${t.slug}${t.name ? ` (${t.name})` : ''}${t.context ? ` — ${t.context}` : ''}`
+        );
+        return {
+          content: [{
+            type: 'text' as const,
+            text: JSON.stringify({
+              status: 'no_team_selected',
+              message: 'Multiple teams are configured but none is active. Call asynkor_teams to see them, then asynkor_switch to select one.',
+              available_teams: teamSummaries,
+            }),
+          }],
+          isError: true,
+        } satisfies CallToolResult;
+      }
 
       if (!this.goClient) {
         return {
@@ -277,7 +541,29 @@ export class AsynkorMcpProxy {
         } satisfies CallToolResult;
       }
 
-      const result = await this.goClient.callTool({ name, arguments: args ?? {} });
+      let result = await this.goClient.callTool({ name, arguments: args ?? {} });
+
+      // Auto-refresh: if the server reports an invalid key, try to
+      // refresh the API key using the stored refresh token, reconnect,
+      // and retry the tool call once.
+      const resultText = (result.content as Array<{ type: string; text?: string }>)?.[0]?.text ?? '';
+      if (result.isError && resultText.includes('invalid_key')) {
+        const activeTeam = this.teams.find(t => t.slug === this.activeTeamSlug);
+        if (activeTeam) {
+          const newKey = await this.refreshApiKey(activeTeam);
+          if (newKey) {
+            activeTeam.apiKey = newKey;
+            this.currentApiKey = newKey;
+            try {
+              await this.goClient?.close();
+            } catch {}
+            this.goClient = await this.connectToGoServer();
+            setupNotificationForwarding();
+            result = await this.goClient.callTool({ name, arguments: args ?? {} });
+          }
+        }
+      }
+
       return result as CallToolResult;
     });
 
