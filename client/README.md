@@ -1,0 +1,185 @@
+# @asynkor/mcp
+
+Real-time coordination for teams running AI coding agents.
+
+This is the open-source MCP client for [Asynkor](https://asynkor.com). It ships the `asynkor` CLI and the stdio MCP shim your IDE's agent (Claude Code, Cursor, Windsurf, Zed, JetBrains, Copilot, Codex, Trae, Antigravity, or anything that speaks MCP) connects through.
+
+- **License:** MIT
+- **Repository:** https://github.com/asynkor/asynkor
+- **Docs:** https://asynkor.com/docs
+- **Dashboard:** https://asynkor.com
+
+---
+
+## What it does
+
+When a team runs multiple AI coding agents in parallel on the same codebase, agents collide. Two sessions touch the same file. Branches diverge. Someone spends Friday untangling merge conflicts instead of shipping.
+
+Asynkor is the coordination layer that prevents this. Every agent on the team connects to one MCP server. Before editing a file, the agent acquires an atomic file lease. Other agents trying the same path see the lock and wait. When an agent finishes, the next one inherits the latest file content and the team's accumulated memory — across any IDE, any laptop, any agent framework.
+
+This package (`@asynkor/mcp`) is the piece that runs on your machine. It proxies between your IDE's agent and the Asynkor server over MCP, and it ships the setup CLI.
+
+---
+
+## Quickstart
+
+```bash
+# 1. Get an API key at https://asynkor.com (free for solo developers and small teams)
+
+# 2. In your project directory:
+ASYNKOR_API_KEY=cf_live_... npx @asynkor/mcp init
+
+# 3. Register the MCP server with Claude Code (once per machine):
+claude mcp add -s user asynkor -- npx @asynkor/mcp start
+
+# 4. Restart Claude Code. Every session now starts with a team briefing.
+```
+
+For Cursor, Windsurf, Zed, JetBrains, and others, replace step 3 with the corresponding registration — `asynkor init --ide <name>` writes the config for you. See [Supported IDEs](#supported-ides) below.
+
+### Non-interactive mode
+
+If `ASYNKOR_API_KEY` is set in the environment, `init` runs without prompting — useful for agents setting up Asynkor on behalf of a developer, or for CI.
+
+```bash
+ASYNKOR_API_KEY=cf_live_... npx -y @asynkor/mcp init
+```
+
+---
+
+## MCP tool surface
+
+Twelve tools. Every agent connected to the server can call them. Once your IDE is wired up, these are auto-approved by default (via `.claude/settings.json` for Claude Code; similar settings for other IDEs).
+
+| Tool | What it does |
+|------|--------------|
+| `asynkor_briefing` | Team state at session start — who is active, what was recently shipped, what follow-ups are open, applicable rules, memories, zones, and context. |
+| `asynkor_start` | Declare the work you're about to do. Acquires file leases on declared paths, runs overlap detection, can resume a parked session via `handoff_id` or pick up an open `followup_id`. |
+| `asynkor_check` | Before an edit, check for active overlaps, applicable rules, protected zones, and relevant team memories on specific paths. Read-only. |
+| `asynkor_lease_acquire` | Acquire leases on additional paths mid-session (paths not declared in your initial `asynkor_start`). |
+| `asynkor_lease_wait` | Block up to 25–30s waiting for a leased path to free. Returns `still_blocked` if the lease holder outlasts the window so you can work on other files and retry. |
+| `asynkor_remember` | Save knowledge to the team brain — architectural decisions, gotchas, conventions. Tagged + path-scoped. Future agents see it during `asynkor_briefing`. |
+| `asynkor_finish` | Complete work. Uploads result, learnings, decisions, file snapshots (critical for cross-machine handoffs), follow-ups. Releases leases. |
+| `asynkor_park` | Save incomplete work for another agent to resume. Stores progress, notes, learnings, decisions. Returns a `handoff_id` that appears in the next briefing. |
+| `asynkor_cancel` | Clean up stale or orphaned work (disconnected sessions holding leases). Requires a `work_id` from the briefing. |
+| `asynkor_context` | Read the long-term team context document (single versioned markdown, owner-curated). |
+| `asynkor_context_update` | Write a new version of the long-term context. Versions are atomic — always pass the full new content, not a diff. |
+| `asynkor_switch_team` | Switch the active team for a user-scoped API key, or confirm the current team. |
+
+Full reference with inputs, outputs, and examples: https://asynkor.com/docs
+
+---
+
+## The coordination model in one paragraph
+
+Every edit starts with a lease — acquired atomically through a Redis Lua script so the check-and-set is single-threaded across the whole team. When an agent finishes, it uploads file snapshots (content-addressed) along with learnings and decisions. The next agent — on any machine — inherits both the latest file content and the team's accumulated memory. Sessions that can't complete hand off a full context package to the next agent via `asynkor_park`. Team memory (`asynkor_remember`) compounds across sessions; zones mark paths that need elevated confirmation.
+
+---
+
+## Supported IDEs
+
+`asynkor init --ide <name>` writes the appropriate MCP config. Anything that speaks MCP works — the list below is just the IDEs we've validated.
+
+| IDE | `--ide` flag | Notes |
+|-----|--------------|-------|
+| Claude Code | _auto-detected_ | First-class: `.claude/settings.json` + auto-approval + slash commands |
+| Cursor | `cursor` | Writes `.cursor/mcp.json` + `.cursorrules` |
+| Windsurf | `windsurf` | Writes `~/.codeium/windsurf/mcp_config.json` + `.windsurfrules` |
+| Zed | `zed` | Writes `~/.config/zed/settings.json` |
+| VS Code / Copilot | `vscode` | Writes `.vscode/mcp.json` |
+| JetBrains (IntelliJ / WebStorm / PyCharm / Junie) | `jetbrains` | Writes `.junie/mcp.json` |
+| OpenAI Codex CLI | `codex` | Writes `~/.codex/config.toml` |
+| Trae | `trae` | Writes `.trae/mcp.json` |
+| Google Antigravity | `antigravity` | Writes `.antigravity/mcp_config.json` |
+
+---
+
+## CLI reference
+
+The `init` command registers the package locally as the `asynkor` binary, so after the first run you can invoke it without `npx`.
+
+```
+asynkor start                        Run the MCP proxy (what your IDE calls)
+asynkor init                         Write .asynkor.json + IDE config
+asynkor init --ide <name>            Target a specific IDE
+asynkor init --link <url>            Set up from a join-link URL
+asynkor setup <url>                  Alias for `init --link`
+asynkor login                        Browser-based login — stores API key
+asynkor status                       Print the current team briefing
+
+asynkor teams                        List configured teams
+asynkor teams create <slug>          Create a team on the backend
+asynkor teams add                    Add an existing team to local config
+asynkor teams remove <slug>          Remove a team from local config
+asynkor teams switch <slug>          Set the active team
+
+asynkor invite <email>               Email a team invite (admin role optional)
+asynkor invite link                  Generate a shareable join-link URL
+asynkor keys list                    List API keys for the active team
+asynkor keys create                  Create a new API key (shown once)
+asynkor keys revoke <keyId>          Revoke an API key
+
+asynkor help                         Print this.
+```
+
+Full help with flags: `asynkor help`.
+
+---
+
+## Environment variables
+
+| Variable | Purpose |
+|----------|---------|
+| `ASYNKOR_API_KEY` | API key. Used by `start` and by `init` for non-interactive setup. |
+| `ASYNKOR_SERVER_URL` | Override the MCP server URL (default `https://mcp.asynkor.com`). |
+| `ASYNKOR_TEAM` | Active team slug — overrides `active_team` in `.asynkor.json`. |
+
+---
+
+## Multi-team config
+
+One developer can be on multiple teams. `.asynkor.json` supports a teams array; the active team is switched via `asynkor teams switch <slug>` or the `ASYNKOR_TEAM` env var.
+
+```json
+{
+  "teams": [
+    { "slug": "acme-backend",  "api_key": "cf_live_...", "context": "Main product" },
+    { "slug": "open-source",   "api_key": "cf_live_...", "context": "OSS side project" }
+  ],
+  "active_team": "acme-backend"
+}
+```
+
+Per-project keys can also live in `.asynkor.json` in the project root (gitignored), or globally in `~/.asynkor/config.json`.
+
+---
+
+## Self-hosting
+
+Asynkor is fully self-hostable. If your codebase is air-gapped or subject to data-residency requirements, run the Go MCP server, Postgres, and Redis inside your own VPC — nothing leaves your perimeter.
+
+Point the client at your deployment with `ASYNKOR_SERVER_URL` or the `serverUrl` field in `.asynkor.json`. The deployment guide lives at https://asynkor.com/docs under "Self-hosting".
+
+---
+
+## What Asynkor does not do
+
+Asynkor coordinates what lands in your repo. It does not:
+
+- **Write code.** Your agents do. Swap your agent tomorrow — Asynkor stays the same.
+- **Auto-merge PRs.** Collision prevention happens before the edit. Merging stays in your existing git / CI flow.
+- **Replace your CI, git host, or agent.** It sits between them.
+
+In the hosted deployment, file snapshots transit our infrastructure between agent handoffs so the next agent inherits the latest content. For air-gapped codebases, self-host.
+
+---
+
+## Contributing
+
+Issues, PRs, and discussions welcome at https://github.com/asynkor/asynkor. The client (this package) is MIT-licensed; the full Asynkor project is Apache-2.0. The bar for contributions is straightforward: real bugs, real features, honest tests.
+
+---
+
+## License
+
+MIT — see LICENSE.

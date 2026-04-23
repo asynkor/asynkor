@@ -12,8 +12,7 @@
 <p align="center">
   <a href="https://www.npmjs.com/package/@asynkor/mcp"><img src="https://img.shields.io/npm/v/@asynkor/mcp?style=flat-square&color=0D7C72" alt="npm" /></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-blue?style=flat-square" alt="License" /></a>
-  <a href="https://github.com/asynkor-com/asynkor/stargazers"><img src="https://img.shields.io/github/stars/asynkor-com/asynkor?style=flat-square" alt="Stars" /></a>
-  <a href="https://discord.gg/asynkor"><img src="https://img.shields.io/discord/0?label=discord&style=flat-square&color=5865F2" alt="Discord" /></a>
+  <a href="https://github.com/asynkor/asynkor/stargazers"><img src="https://img.shields.io/github/stars/asynkor/asynkor?style=flat-square" alt="Stars" /></a>
 </p>
 
 <p align="center">
@@ -113,6 +112,9 @@ Works with Cursor, Windsurf, VS Code (Copilot), JetBrains, Zed, Codex CLI, and a
 | `asynkor_lease_acquire` | Lease additional files mid-work |
 | `asynkor_lease_wait` | Wait for blocked files (25s, retryable) |
 | `asynkor_cancel` | Clean up stale/orphaned work |
+| `asynkor_context` | Read the long-term project context doc (versioned, owner-curated) |
+| `asynkor_context_update` | Write a new version of the long-term context (atomic replace) |
+| `asynkor_switch_team` | Switch the active team (user-scoped API keys) |
 
 ## Architecture
 
@@ -149,7 +151,7 @@ Agents (Claude Code, Cursor, Windsurf, Codex)
 Run the full stack with Docker Compose:
 
 ```bash
-git clone https://github.com/asynkor-com/asynkor.git
+git clone https://github.com/asynkor/asynkor.git
 cd asynkor
 cp .env.example .env  # edit with your values
 docker compose up -d
@@ -172,9 +174,9 @@ Full docs at [asynkor.com/docs](https://asynkor.com/docs):
 
 ## Community
 
-- [Discord](https://discord.gg/asynkor) — questions, feedback, feature requests
-- [GitHub Issues](https://github.com/asynkor-com/asynkor/issues) — bug reports
-- [X / Twitter](https://x.com/asynkor) — updates
+- [GitHub Issues](https://github.com/asynkor/asynkor/issues) — bug reports and feature requests
+- [GitHub Discussions](https://github.com/asynkor/asynkor/discussions) — questions and ideas
+- Direct contact: [contact@asynkor.com](mailto:contact@asynkor.com)
 
 ## Contributing
 
