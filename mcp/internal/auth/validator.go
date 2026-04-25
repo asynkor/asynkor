@@ -12,7 +12,7 @@ import (
 )
 
 type cachedAuth struct {
-	team    *TeamContext
+	key     *KeyContext
 	expires time.Time
 }
 
@@ -48,19 +48,36 @@ type validateKeyConfig struct {
 	AllowForceRelease bool     `json:"allow_force_release"`
 }
 
-type validateKeyResponse struct {
+type validateKeyTeam struct {
 	TeamID   string            `json:"team_id"`
 	TeamSlug string            `json:"team_slug"`
 	Plan     string            `json:"plan"`
 	Config   validateKeyConfig `json:"config"`
 }
 
-func (v *Validator) Validate(apiKey string) (*TeamContext, error) {
+type validateKeyResponse struct {
+	// Team-scoped shape (legacy): team fields on the envelope.
+	Scope    string            `json:"scope"`
+	TeamID   string            `json:"team_id"`
+	TeamSlug string            `json:"team_slug"`
+	Plan     string            `json:"plan"`
+	Config   validateKeyConfig `json:"config"`
+
+	// User-scoped shape: list of accessible teams + default.
+	UserID        string            `json:"user_id"`
+	Teams         []validateKeyTeam `json:"teams"`
+	DefaultTeamID string            `json:"default_team_id"`
+}
+
+// Validate returns the full KeyContext. For team-scoped keys Teams has one
+// entry and DefaultTeamID matches it; for user-scoped keys Teams lists every
+// team the user can access.
+func (v *Validator) Validate(apiKey string) (*KeyContext, error) {
 	// Check cache first.
 	v.mu.RLock()
 	if c, ok := v.cache[apiKey]; ok && time.Now().Before(c.expires) {
 		v.mu.RUnlock()
-		return c.team, nil
+		return c.key, nil
 	}
 	v.mu.RUnlock()
 
@@ -96,18 +113,33 @@ func (v *Validator) Validate(apiKey string) (*TeamContext, error) {
 		return nil, fmt.Errorf("authentication failed")
 	}
 
-	patterns := result.Config.IgnorePatterns
-	if patterns == nil {
-		patterns = []string{}
+	kc := &KeyContext{Scope: result.Scope}
+	if kc.Scope == "" {
+		// Legacy response (pre-V9) has no scope field → treat as team-scoped.
+		kc.Scope = "team"
 	}
 
-	tc := &TeamContext{
-		TeamID:            result.TeamID,
-		TeamSlug:          result.TeamSlug,
-		Plan:              result.Plan,
-		HeartbeatInterval: result.Config.HeartbeatInterval,
-		ConflictMode:      result.Config.ConflictMode,
-		IgnorePatterns:    patterns,
+	if kc.Scope == "user" {
+		kc.UserID = result.UserID
+		kc.DefaultTeamID = result.DefaultTeamID
+		for _, t := range result.Teams {
+			kc.Teams = append(kc.Teams, teamFromResponse(t))
+		}
+		if len(kc.Teams) == 0 {
+			return nil, fmt.Errorf("authentication failed")
+		}
+		if kc.DefaultTeamID == "" {
+			kc.DefaultTeamID = kc.Teams[0].TeamID
+		}
+	} else {
+		tc := teamFromResponse(validateKeyTeam{
+			TeamID:   result.TeamID,
+			TeamSlug: result.TeamSlug,
+			Plan:     result.Plan,
+			Config:   result.Config,
+		})
+		kc.Teams = []*TeamContext{tc}
+		kc.DefaultTeamID = tc.TeamID
 	}
 
 	// Cache successful validation.
@@ -147,8 +179,23 @@ func (v *Validator) Validate(apiKey string) (*TeamContext, error) {
 			}
 		}
 	}
-	v.cache[apiKey] = &cachedAuth{team: tc, expires: time.Now().Add(authCacheTTL)}
+	v.cache[apiKey] = &cachedAuth{key: kc, expires: time.Now().Add(authCacheTTL)}
 	v.mu.Unlock()
 
-	return tc, nil
+	return kc, nil
+}
+
+func teamFromResponse(t validateKeyTeam) *TeamContext {
+	patterns := t.Config.IgnorePatterns
+	if patterns == nil {
+		patterns = []string{}
+	}
+	return &TeamContext{
+		TeamID:            t.TeamID,
+		TeamSlug:          t.TeamSlug,
+		Plan:              t.Plan,
+		HeartbeatInterval: t.Config.HeartbeatInterval,
+		ConflictMode:      t.Config.ConflictMode,
+		IgnorePatterns:    patterns,
+	}
 }

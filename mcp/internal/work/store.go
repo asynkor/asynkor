@@ -446,25 +446,60 @@ func (s *Store) CleanupStale(ctx context.Context, teamID string, maxAge time.Dur
 	return cleaned, nil
 }
 
-// Cancel removes a work item from the active set and deletes its data.
-// Used for manual cleanup of stale/orphaned work items.
+// Cancel removes a work item from the active set, the parked list, and
+// deletes its data. Used for manual cleanup of stale/orphaned work items and
+// auto-cleanup of the originating handoff when asynkor_finish closes a
+// resumed session.
 func (s *Store) Cancel(ctx context.Context, teamID, workID string) error {
+	s.redis.SRem(ctx, s.activeSetKey(teamID), workID)
+
+	// Try fast path: read the work key and LRem by exact bytes. Park writes
+	// the same JSON to both places atomically, so if the key still exists
+	// it matches the list entry.
 	data, err := s.redis.Get(ctx, s.workKey(teamID, workID)).Bytes()
-	if err == redis.Nil {
-		// Work data already gone — just clean up the active set reference.
-		s.redis.SRem(ctx, s.activeSetKey(teamID), workID)
+	if err != nil && err != redis.Nil {
+		return err
+	}
+
+	// Legacy-orphan path: the work key was already deleted by an earlier
+	// buggy Cancel, but the parked list entry can still be there. Scan the
+	// list (capped at 30 entries by LTRIM in parkScript) and find the entry
+	// whose parsed ID matches. This is how we rescue handoffs cancelled
+	// before the fix shipped.
+	if err == redis.Nil || len(data) == 0 {
+		data = s.findParkedEntryBytes(ctx, teamID, workID)
+	}
+
+	if len(data) > 0 {
+		s.redis.LRem(ctx, s.parkedListKey(teamID), 1, string(data))
+		var w Work
+		if json.Unmarshal(data, &w) == nil && w.SessionID != "" {
+			s.redis.Del(ctx, s.sessionWorkKey(teamID, w.SessionID))
+		}
+	}
+
+	s.redis.Del(ctx, s.workKey(teamID, workID))
+	return nil
+}
+
+// findParkedEntryBytes returns the raw bytes of the parked-list entry whose
+// parsed Work.ID matches workID, or nil if not found. Used by Cancel to LRem
+// legacy orphans whose work key was deleted before the parked-list LRem was
+// added to Cancel.
+func (s *Store) findParkedEntryBytes(ctx context.Context, teamID, workID string) []byte {
+	vals, err := s.redis.LRange(ctx, s.parkedListKey(teamID), 0, -1).Result()
+	if err != nil {
 		return nil
 	}
-	if err != nil {
-		return err
+	for _, v := range vals {
+		var w Work
+		if err := json.Unmarshal([]byte(v), &w); err != nil {
+			continue
+		}
+		if w.ID == workID {
+			return []byte(v)
+		}
 	}
-	var w Work
-	if err := json.Unmarshal(data, &w); err != nil {
-		return err
-	}
-	s.redis.SRem(ctx, s.activeSetKey(teamID), workID)
-	s.redis.Del(ctx, s.workKey(teamID, workID))
-	s.redis.Del(ctx, s.sessionWorkKey(teamID, w.SessionID))
 	return nil
 }
 

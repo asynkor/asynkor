@@ -76,17 +76,17 @@ func TestGoJavaIntegration_ValidateKey(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Validate: %v", err)
 	}
-	if ctx.TeamID != "team-uuid-123" {
-		t.Errorf("TeamID = %s, want team-uuid-123", ctx.TeamID)
+	if ctx.Teams[0].TeamID != "team-uuid-123" {
+		t.Errorf("TeamID = %s, want team-uuid-123", ctx.Teams[0].TeamID)
 	}
-	if ctx.TeamSlug != "acme" {
-		t.Errorf("TeamSlug = %s, want acme", ctx.TeamSlug)
+	if ctx.Teams[0].TeamSlug != "acme" {
+		t.Errorf("TeamSlug = %s, want acme", ctx.Teams[0].TeamSlug)
 	}
-	if ctx.ConflictMode != "warn" {
-		t.Errorf("ConflictMode = %s, want warn", ctx.ConflictMode)
+	if ctx.Teams[0].ConflictMode != "warn" {
+		t.Errorf("ConflictMode = %s, want warn", ctx.Teams[0].ConflictMode)
 	}
-	if len(ctx.IgnorePatterns) != 2 {
-		t.Errorf("IgnorePatterns = %v, want 2 items", ctx.IgnorePatterns)
+	if len(ctx.Teams[0].IgnorePatterns) != 2 {
+		t.Errorf("IgnorePatterns = %v, want 2 items", ctx.Teams[0].IgnorePatterns)
 	}
 }
 
@@ -124,23 +124,23 @@ func TestFullWorkCycle(t *testing.T) {
 	// Create session
 	sess := &session.Session{
 		ID:          "sess-integration",
-		TeamID:      teamCtx.TeamID,
+		TeamID:      teamCtx.Teams[0].TeamID,
 		Agent:       "claude-code",
 		ConnectedAt: time.Now().UTC(),
 		LastSeenAt:  time.Now().UTC(),
 	}
-	if err := sessionStore.Create(ctx, sess, teamCtx.HeartbeatInterval); err != nil {
+	if err := sessionStore.Create(ctx, sess, teamCtx.Teams[0].HeartbeatInterval); err != nil {
 		t.Fatalf("create session: %v", err)
 	}
 
 	// No active work initially
-	active, _ := workStore.ListActive(ctx, teamCtx.TeamID)
+	active, _ := workStore.ListActive(ctx, teamCtx.Teams[0].TeamID)
 	if len(active) != 0 {
 		t.Fatalf("expected 0 active works, got %d", len(active))
 	}
 
 	// Start work
-	w, err := workStore.Start(ctx, teamCtx.TeamID, "sess-int-1", "dev-mac", "adding JWT refresh rotation", nil)
+	w, err := workStore.Start(ctx, teamCtx.Teams[0].TeamID, "sess-int-1", "dev-mac", "adding JWT refresh rotation", nil)
 	if err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -149,7 +149,7 @@ func TestFullWorkCycle(t *testing.T) {
 	}
 
 	// Another agent checks briefing — sees active work
-	active, _ = workStore.ListActive(ctx, teamCtx.TeamID)
+	active, _ = workStore.ListActive(ctx, teamCtx.Teams[0].TeamID)
 	if len(active) != 1 {
 		t.Fatalf("expected 1 active work, got %d", len(active))
 	}
@@ -162,7 +162,7 @@ func TestFullWorkCycle(t *testing.T) {
 		{Description: "update auth middleware", Area: "src/middleware/", Priority: "critical", Type: "task"},
 		{Description: "review the implementation before shipping", Priority: "normal", Type: "review"},
 	}
-	completed, err := workStore.Complete(ctx, teamCtx.TeamID, w.ID, "implemented refresh rotation, tokens now rotate on use", followups)
+	completed, err := workStore.Complete(ctx, teamCtx.Teams[0].TeamID, w.ID, "implemented refresh rotation, tokens now rotate on use", followups)
 	if err != nil {
 		t.Fatalf("Complete: %v", err)
 	}
@@ -171,13 +171,13 @@ func TestFullWorkCycle(t *testing.T) {
 	}
 
 	// Active list is now empty
-	active, _ = workStore.ListActive(ctx, teamCtx.TeamID)
+	active, _ = workStore.ListActive(ctx, teamCtx.Teams[0].TeamID)
 	if len(active) != 0 {
 		t.Fatalf("expected 0 active after complete, got %d", len(active))
 	}
 
 	// Recent list shows the completed work
-	recent, _ := workStore.ListRecent(ctx, teamCtx.TeamID, 5)
+	recent, _ := workStore.ListRecent(ctx, teamCtx.Teams[0].TeamID, 5)
 	if len(recent) != 1 {
 		t.Fatalf("expected 1 recent work, got %d", len(recent))
 	}
@@ -193,7 +193,7 @@ func TestFullWorkCycle(t *testing.T) {
 	}
 
 	// Followups are visible
-	openFollowups, sources := workStore.AllOpenFollowups(ctx, teamCtx.TeamID)
+	openFollowups, sources := workStore.AllOpenFollowups(ctx, teamCtx.Teams[0].TeamID)
 	if len(openFollowups) != 2 {
 		t.Fatalf("expected 2 followups, got %d", len(openFollowups))
 	}
@@ -206,20 +206,20 @@ func TestFullWorkCycle(t *testing.T) {
 
 	// Taking a followup removes it from open list
 	takenID := recent[0].Followups[0].ID
-	nextWork, _ := workStore.Start(ctx, teamCtx.TeamID, "sess-int-2", "dev-mac", "fixing auth middleware", nil)
-	if err := workStore.TakeFollowup(ctx, teamCtx.TeamID, takenID, nextWork.ID); err != nil {
+	nextWork, _ := workStore.Start(ctx, teamCtx.Teams[0].TeamID, "sess-int-2", "dev-mac", "fixing auth middleware", nil)
+	if err := workStore.TakeFollowup(ctx, teamCtx.Teams[0].TeamID, takenID, nextWork.ID); err != nil {
 		t.Fatalf("TakeFollowup: %v", err)
 	}
-	open, _ := workStore.AllOpenFollowups(ctx, teamCtx.TeamID)
+	open, _ := workStore.AllOpenFollowups(ctx, teamCtx.Teams[0].TeamID)
 	if len(open) != 1 {
 		t.Fatalf("expected 1 open followup after taking one, got %d", len(open))
 	}
 
 	// Cleanup session
-	if err := sessionStore.Delete(ctx, teamCtx.TeamID, sess.ID); err != nil {
+	if err := sessionStore.Delete(ctx, teamCtx.Teams[0].TeamID, sess.ID); err != nil {
 		t.Fatalf("delete session: %v", err)
 	}
-	sessions, _ := sessionStore.List(ctx, teamCtx.TeamID)
+	sessions, _ := sessionStore.List(ctx, teamCtx.Teams[0].TeamID)
 	if len(sessions) != 0 {
 		t.Fatalf("expected 0 sessions after delete, got %d", len(sessions))
 	}

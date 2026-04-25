@@ -27,6 +27,7 @@ type contextKey string
 
 const (
 	ctxKeyTeam     contextKey = "team_ctx"
+	ctxKeyKey      contextKey = "key_ctx"
 	ctxKeySession  contextKey = "session_id"
 	ctxKeyHostname contextKey = "hostname"
 	ctxKeyError    contextKey = "auth_error"
@@ -134,7 +135,7 @@ func (s *Server) makeContextFunc() server.SSEContextFunc {
 			return context.WithValue(ctx, ctxKeyError, "missing Authorization header or api_key param")
 		}
 
-		teamCtx, err := s.validator.Validate(apiKey)
+		keyCtx, err := s.validator.Validate(apiKey)
 		if err != nil {
 			log.Printf("auth: invalid key: %v", err)
 			return context.WithValue(ctx, ctxKeyError, "invalid_key")
@@ -150,6 +151,26 @@ func (s *Server) makeContextFunc() server.SSEContextFunc {
 		sessID := r.URL.Query().Get("sessionId")
 		if sessID == "" {
 			return context.WithValue(ctx, ctxKeyError, "missing sessionId query param")
+		}
+
+		// Resolve which team this call operates under. For team-scoped keys
+		// there's only one option. For user-scoped keys we honor the
+		// session-level active_team_id set by asynkor_switch_team; if that
+		// team is no longer accessible (user was removed, allowlist changed)
+		// we fall back to DefaultTeamID and clear the override.
+		teamCtx := keyCtx.FindTeam(keyCtx.DefaultTeamID)
+		if keyCtx.Scope == "user" {
+			if active, _ := s.sessions.GetActiveTeam(ctx, sessID); active != "" {
+				if t := keyCtx.FindTeam(active); t != nil {
+					teamCtx = t
+				} else {
+					_ = s.sessions.ClearActiveTeam(ctx, sessID)
+					log.Printf("auth: active_team_id %s no longer accessible for session %s; reverting to default %s", active, sessID, keyCtx.DefaultTeamID)
+				}
+			}
+		}
+		if teamCtx == nil {
+			return context.WithValue(ctx, ctxKeyError, "no accessible team for key")
 		}
 
 		hostname := sanitizeHeader(r.Header.Get("X-Hostname"), 255)
@@ -188,6 +209,7 @@ func (s *Server) makeContextFunc() server.SSEContextFunc {
 		}
 
 		ctx = context.WithValue(ctx, ctxKeyTeam, teamCtx)
+		ctx = context.WithValue(ctx, ctxKeyKey, keyCtx)
 		ctx = context.WithValue(ctx, ctxKeySession, sessID)
 		ctx = context.WithValue(ctx, ctxKeyHostname, hostname)
 		return ctx
@@ -414,6 +436,17 @@ func (s *Server) registerTools(mcpServer *server.MCPServer) {
 		),
 		s.handleContextUpdate,
 	)
+
+	mcpServer.AddTool(
+		mcp.NewTool("asynkor_switch_team",
+			mcp.WithDescription("Switch the active team for this session. Only meaningful for user-scoped API keys that can access multiple teams; team-scoped keys should call this to confirm the current team is the intended one. Accepts either a team slug or a team id. Fails if the target team is not in the briefing's teams list, or if the current session has active work (park or finish it first)."),
+			mcp.WithString("team",
+				mcp.Description("Target team — either the team slug (e.g. 'acme-frontend') or the team id (UUID). Check asynkor_briefing for the list of accessible teams."),
+				mcp.Required(),
+			),
+		),
+		s.handleSwitchTeam,
+	)
 }
 
 func (s *Server) registerResources(mcpServer *server.MCPServer) {
@@ -465,6 +498,11 @@ func extractAPIKey(r *http.Request) string {
 
 func getTeam(ctx context.Context) *auth.TeamContext {
 	v, _ := ctx.Value(ctxKeyTeam).(*auth.TeamContext)
+	return v
+}
+
+func getKey(ctx context.Context) *auth.KeyContext {
+	v, _ := ctx.Value(ctxKeyKey).(*auth.KeyContext)
 	return v
 }
 

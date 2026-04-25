@@ -57,6 +57,37 @@ func (s *Store) Delete(ctx context.Context, teamID, sessionID string) error {
 	return err
 }
 
+// Active team override for user-scoped keys. Keyed globally (not per team)
+// because the whole point is letting a session switch between teams without
+// recreating its team-bound record.
+//
+// On every Server.makeContextFunc call we look up this key first; if set
+// and still a valid member of the user's accessible teams, we bind the
+// session to that team. Otherwise we fall back to the key's default team.
+func (s *Store) activeTeamKey(sessionID string) string {
+	return fmt.Sprintf("session:%s:active_team_id", sessionID)
+}
+
+func (s *Store) GetActiveTeam(ctx context.Context, sessionID string) (string, error) {
+	v, err := s.redis.Get(ctx, s.activeTeamKey(sessionID)).Result()
+	if err == redis.Nil {
+		return "", nil
+	}
+	return v, err
+}
+
+func (s *Store) SetActiveTeam(ctx context.Context, sessionID, teamID string, heartbeatInterval int) error {
+	ttl := time.Duration(heartbeatInterval*3) * time.Second
+	if ttl <= 0 {
+		ttl = 24 * time.Hour
+	}
+	return s.redis.Set(ctx, s.activeTeamKey(sessionID), teamID, ttl).Err()
+}
+
+func (s *Store) ClearActiveTeam(ctx context.Context, sessionID string) error {
+	return s.redis.Del(ctx, s.activeTeamKey(sessionID)).Err()
+}
+
 func (s *Store) List(ctx context.Context, teamID string) ([]*Session, error) {
 	ids, err := s.redis.SMembers(ctx, s.sessionsSetKey(teamID)).Result()
 	if err != nil {

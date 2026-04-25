@@ -15,6 +15,7 @@ import (
 
 	"github.com/mark3labs/mcp-go/mcp"
 
+	"asynkor/mcp/internal/auth"
 	"asynkor/mcp/internal/lease"
 	"asynkor/mcp/internal/teamctx"
 	"asynkor/mcp/internal/work"
@@ -115,6 +116,19 @@ func (s *Server) handleBriefing(ctx context.Context, _ mcp.CallToolRequest) (*mc
 
 	var sb strings.Builder
 	sb.WriteString(fmt.Sprintf("Team: %s\n", team.TeamSlug))
+
+	// Multi-team switcher surface. Only rendered for user-scoped keys that
+	// can see more than one team; team-scoped keys keep the briefing clean.
+	if kc := getKey(ctx); kc != nil && kc.Scope == "user" && len(kc.Teams) > 1 {
+		sb.WriteString(fmt.Sprintf("\nAccessible teams (%d) — call asynkor_switch_team to change the active team:\n", len(kc.Teams)))
+		for _, t := range kc.Teams {
+			marker := "  "
+			if t.TeamID == team.TeamID {
+				marker = "→ "
+			}
+			sb.WriteString(fmt.Sprintf("%s%s (%s)\n", marker, t.TeamSlug, t.TeamID))
+		}
+	}
 
 	tc := s.teamCtx.Get(ctx, team.TeamID)
 
@@ -668,6 +682,16 @@ func (s *Server) handleFinish(ctx context.Context, req mcp.CallToolRequest) (*mc
 	completed.Learnings = learnings
 	completed.Decisions = decisions
 	completed.FilesTouched = filesTouched
+
+	// If this session was resumed from a parked handoff, cancel the original
+	// handoff so it stops appearing in future briefings under "Parked work —
+	// available for pickup". Without this, every resumed-then-finished session
+	// leaks a stale handoff row forever.
+	if current.HandoffFrom != "" {
+		if err := s.works.Cancel(ctx, team.TeamID, current.HandoffFrom); err != nil {
+			log.Printf("WARN cancel originating handoff %s on finish: %v", current.HandoffFrom, err)
+		}
+	}
 
 	if err := s.leases.ReleaseByWork(ctx, team.TeamID, current.ID); err != nil {
 		log.Printf("WARN release leases on finish: %v", err)
@@ -1405,7 +1429,7 @@ func (s *Server) handleCancel(ctx context.Context, req mcp.CallToolRequest) (*mc
 	log.Printf("work cancelled: team=%s work=%s", team.TeamSlug, wid)
 	return toolJSON(map[string]any{
 		"ok":      true,
-		"message": fmt.Sprintf("Work %s cancelled. Leases released, removed from active set.", wid),
+		"message": fmt.Sprintf("Work %s cancelled. Leases released, removed from active set and parked list.", wid),
 	}), nil
 }
 
@@ -1645,4 +1669,73 @@ func (s *Server) handleContextUpdate(ctx context.Context, req mcp.CallToolReques
 		resp["message"] = fmt.Sprintf("Project context saved as v%d. No owner instructions set yet; consider asking an admin to fill them in via the dashboard.", pc.Version)
 	}
 	return toolJSON(resp), nil
+}
+
+// handleSwitchTeam rebinds the session's active team to the one named in
+// req.team (slug or id). Only meaningful for user-scoped keys; team-scoped
+// keys can technically call it but can only "switch" to their single team.
+//
+// Refuses if the session has an active work item — those are team-bound in
+// Redis, so switching mid-work would orphan them. The agent must park or
+// finish first.
+func (s *Server) handleSwitchTeam(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	if e := getAuthError(ctx); e != "" {
+		return toolError("unauthorized: " + e), nil
+	}
+	team := getTeam(ctx)
+	kc := getKey(ctx)
+	sessID := getSessionID(ctx)
+	if team == nil || kc == nil || sessID == "" {
+		return toolError("unauthorized"), nil
+	}
+
+	target := strings.TrimSpace(req.GetString("team", ""))
+	if target == "" {
+		return toolError("team is required (slug or id)"), nil
+	}
+
+	// Find the target in the accessible list by id or slug.
+	var match *auth.TeamContext
+	for _, t := range kc.Teams {
+		if t.TeamID == target || t.TeamSlug == target {
+			match = t
+			break
+		}
+	}
+	if match == nil {
+		available := make([]string, 0, len(kc.Teams))
+		for _, t := range kc.Teams {
+			available = append(available, t.TeamSlug)
+		}
+		return toolError(fmt.Sprintf("team %q is not accessible with this API key. Accessible teams: %s", target, strings.Join(available, ", "))), nil
+	}
+
+	// No-op switch is idempotent, not an error.
+	if match.TeamID == team.TeamID {
+		return toolJSON(map[string]any{
+			"ok":        true,
+			"team_id":   match.TeamID,
+			"team_slug": match.TeamSlug,
+			"message":   fmt.Sprintf("Already on team %s.", match.TeamSlug),
+		}), nil
+	}
+
+	// Refuse if there's active work on the current team — switching would
+	// orphan work/leases that are keyed under the old team in Redis.
+	if w, _ := s.works.GetBySession(ctx, team.TeamID, sessID); w != nil && w.Status == "active" {
+		return toolError(fmt.Sprintf("cannot switch teams while you have active work (work_id=%s, plan=%q) on team %s. Park or finish it first, then retry asynkor_switch_team.", w.ID, w.Plan, team.TeamSlug)), nil
+	}
+
+	if err := s.sessions.SetActiveTeam(ctx, sessID, match.TeamID, match.HeartbeatInterval); err != nil {
+		log.Printf("switch_team: SetActiveTeam error: %v", err)
+		return toolError("failed to persist team switch"), nil
+	}
+
+	return toolJSON(map[string]any{
+		"ok":        true,
+		"team_id":   match.TeamID,
+		"team_slug": match.TeamSlug,
+		"plan":      match.Plan,
+		"message":   fmt.Sprintf("Active team switched to %s. The next tool call will operate on this team.", match.TeamSlug),
+	}), nil
 }

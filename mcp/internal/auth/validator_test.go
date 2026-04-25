@@ -47,17 +47,17 @@ func TestValidate_Success(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	if ctx.TeamID != "550e8400-e29b-41d4-a716-446655440000" {
-		t.Errorf("wrong team_id: %s", ctx.TeamID)
+	if ctx.Teams[0].TeamID != "550e8400-e29b-41d4-a716-446655440000" {
+		t.Errorf("wrong team_id: %s", ctx.Teams[0].TeamID)
 	}
-	if ctx.TeamSlug != "acme" {
-		t.Errorf("wrong team_slug: %s", ctx.TeamSlug)
+	if ctx.Teams[0].TeamSlug != "acme" {
+		t.Errorf("wrong team_slug: %s", ctx.Teams[0].TeamSlug)
 	}
-	if ctx.ConflictMode != "warn" {
-		t.Errorf("wrong conflict_mode: %s", ctx.ConflictMode)
+	if ctx.Teams[0].ConflictMode != "warn" {
+		t.Errorf("wrong conflict_mode: %s", ctx.Teams[0].ConflictMode)
 	}
-	if len(ctx.IgnorePatterns) != 1 || ctx.IgnorePatterns[0] != "dist/*" {
-		t.Errorf("wrong ignore_patterns: %v", ctx.IgnorePatterns)
+	if len(ctx.Teams[0].IgnorePatterns) != 1 || ctx.Teams[0].IgnorePatterns[0] != "dist/*" {
+		t.Errorf("wrong ignore_patterns: %v", ctx.Teams[0].IgnorePatterns)
 	}
 }
 
@@ -132,10 +132,10 @@ func TestValidate_NilIgnorePatterns(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if ctx.IgnorePatterns == nil {
+	if ctx.Teams[0].IgnorePatterns == nil {
 		t.Fatal("IgnorePatterns should never be nil")
 	}
-	if len(ctx.IgnorePatterns) != 0 {
-		t.Fatalf("expected empty slice, got %v", ctx.IgnorePatterns)
+	if len(ctx.Teams[0].IgnorePatterns) != 0 {
+		t.Fatalf("expected empty slice, got %v", ctx.Teams[0].IgnorePatterns)
 	}
 }

@@ -151,6 +151,9 @@ const AUTO_APPROVE_TOOLS = [
   // read-only; writes to the long-term doc (asynkor_context_update) are
   // intentionally NOT auto-approved so the owner sees every modification.
   'mcp__asynkor__asynkor_context',
+  // rewrites session-level active team; low-risk, making it prompt on every
+  // call would defeat the "simpler team switching" point.
+  'mcp__asynkor__asynkor_switch_team',
 ];
 
 const JoinLinkSchema = z.object({
@@ -165,19 +168,32 @@ const JoinLinkSchema = z.object({
 });
 type JoinLinkResponse = z.infer<typeof JoinLinkSchema>;
 
+/**
+ * Claim a one-time join link and get a team API key.
+ *
+ * The URL the user pastes is the shareable frontend URL (e.g.
+ * https://asynkor.com/join/TOKEN) — that's a React SPA path. The actual claim
+ * endpoint is POST https://api.asynkor.com/v1/join/TOKEN on the backend, so we
+ * translate the public URL into an API call before hitting the network.
+ */
 async function fetchJoinLink(url: string): Promise<JoinLinkResponse> {
   if (!url.startsWith('https://')) {
     throw new Error('Join link must use HTTPS.');
   }
-  const res = await fetch(url, {
-    headers: { Accept: 'application/json' },
+  const apiUrl = resolveJoinApiUrl(url);
+  const res = await fetch(apiUrl, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Accept: 'application/json',
+    },
   });
   if (!res.ok) {
     const status = res.status;
-    if (status === 404 || status === 410) {
+    if (status === 404 || status === 410 || status === 409) {
       throw new Error('This join link has expired or has already been claimed.');
     }
-    throw new Error(`Failed to fetch join link (HTTP ${status}).`);
+    throw new Error(`Failed to claim join link (HTTP ${status}).`);
   }
   const json = await res.json();
   const parsed = JoinLinkSchema.safeParse(json);
@@ -185,6 +201,30 @@ async function fetchJoinLink(url: string): Promise<JoinLinkResponse> {
     throw new Error(`Invalid join link response: ${parsed.error.issues.map(i => i.message).join(', ')}`);
   }
   return parsed.data;
+}
+
+/**
+ * Map a public frontend join URL to its backend claim endpoint. The frontend
+ * host might be `asynkor.com` (prod), `staging.asynkor.com`, or something the
+ * user is self-hosting; in each case the API lives under `api.<host>` with the
+ * `/v1/join/:token` path.
+ */
+function resolveJoinApiUrl(frontendUrl: string): string {
+  let parsed: URL;
+  try {
+    parsed = new URL(frontendUrl);
+  } catch {
+    throw new Error('Join link is not a valid URL.');
+  }
+  const match = parsed.pathname.match(/^\/join\/([A-Za-z0-9_-]+)\/?$/);
+  if (!match) {
+    throw new Error('Join link does not look like an Asynkor join URL.');
+  }
+  const token = match[1];
+  const apiHost = parsed.hostname.startsWith('api.')
+    ? parsed.hostname
+    : `api.${parsed.hostname}`;
+  return `${parsed.protocol}//${apiHost}/v1/join/${token}`;
 }
 
 function writeAsynkorJson(data: Record<string, unknown>): void {
@@ -233,6 +273,34 @@ const ASYNKOR_HOOKS = {
     },
   ],
 };
+
+// Claude Code reads slash commands from .claude/commands/*.md. The /asynkor
+// command lets the user switch teams without touching the terminal:
+// typing "/asynkor frontend" triggers asynkor_switch_team on that team;
+// bare "/asynkor" lists accessible teams via asynkor_briefing and waits.
+const ASYNKOR_SLASH_COMMAND = `---
+description: Switch the active Asynkor team for this session
+---
+
+If there are arguments in "$ARGUMENTS", call \`asynkor_switch_team\` with \`team\` set to the argument (slug or id) and confirm the switch to the user in one short line (new team + that the next tool call will run under it).
+
+If "$ARGUMENTS" is empty, call \`asynkor_briefing\` and show me the "Accessible teams" block, then ask which team I want to switch to.
+
+Do not run any other Asynkor tools in response to this command.
+`;
+
+function writeSlashCommands(): void {
+  const commandsDir = path.join(process.cwd(), '.claude', 'commands');
+  if (!fs.existsSync(commandsDir)) fs.mkdirSync(commandsDir, { recursive: true });
+  const commandPath = path.join(commandsDir, 'asynkor.md');
+  if (fs.existsSync(commandPath)) {
+    // Only overwrite if the existing file looks like one of ours — don't
+    // stomp a user-customised command that happens to share the name.
+    const existing = fs.readFileSync(commandPath, 'utf8');
+    if (!existing.includes('asynkor_switch_team')) return;
+  }
+  fs.writeFileSync(commandPath, ASYNKOR_SLASH_COMMAND);
+}
 
 function updateClaudeSettings(): void {
   const claudeDir = path.join(process.cwd(), '.claude');
@@ -502,6 +570,7 @@ async function cmdInit(args: string[]): Promise<void> {
 
     initConfig({ apiKey: envApiKey, serverUrl, team });
     updateClaudeSettings();
+  writeSlashCommands();
     writeClaudeMd(ASYNKOR_CLAUDE_MD);
 
     console.log('Asynkor setup (from environment)');
@@ -537,6 +606,7 @@ async function cmdInit(args: string[]): Promise<void> {
 
   initConfig({ apiKey, serverUrl, team: team || undefined });
   updateClaudeSettings();
+  writeSlashCommands();
   writeClaudeMd(ASYNKOR_CLAUDE_MD);
 
   console.log('\n✓ .asynkor.json created');
@@ -559,6 +629,7 @@ async function setupFromJoinLink(url: string): Promise<void> {
   writeAsynkorJson(data.setup.asynkor_json);
   writeClaudeMd(data.setup.claude_md || ASYNKOR_CLAUDE_MD);
   updateClaudeSettings();
+  writeSlashCommands();
 
   const teamName = data.team.name;
   const teamSlug = data.team.slug;
@@ -798,9 +869,266 @@ async function cmdTeams(args: string[]): Promise<void> {
     return;
   }
 
+  if (sub === 'create') {
+    const slug = args[1];
+    if (!slug || slug.startsWith('--')) {
+      console.error('Usage: asynkor teams create <slug> [--name "Display name"] [--description "..."]');
+      process.exit(1);
+    }
+    if (!/^[a-z0-9-]+$/.test(slug) || slug.length < 2 || slug.length > 40) {
+      console.error('Slug must be 2–40 chars of lowercase letters, numbers, and hyphens only.');
+      process.exit(1);
+    }
+    const createFlags = parseFlags(args.slice(2));
+    const name = createFlags['name'] || slug;
+    const description = createFlags['description'];
+
+    const ctx = readApiContext();
+    const body: Record<string, string> = { slug, name };
+    if (description) body.description = description;
+
+    const team = await apiFetch<{ id: string; slug: string; name: string; api_key?: string; plan: string }>(
+      ctx, 'POST', '/v1/teams', body,
+    );
+
+    if (team.api_key) {
+      addTeamToConfig({
+        slug: team.slug,
+        name: team.name,
+        apiKey: team.api_key,
+        serverUrl: undefined,
+      });
+      const { setActiveTeamInConfig } = await import('./config.js');
+      setActiveTeamInConfig(team.slug);
+      console.log(`Team "${team.slug}" created and set active. API key saved to .asynkor.json.`);
+    } else {
+      console.log(`Team "${team.slug}" created (no API key returned — generate one with \`asynkor keys create --team ${team.slug}\`).`);
+    }
+    return;
+  }
+
   console.error(`Unknown teams subcommand: ${sub}`);
-  console.error('Usage: asynkor teams [list|add|remove|switch]');
+  console.error('Usage: asynkor teams [list|add|create|remove|switch]');
   process.exit(1);
+}
+
+/**
+ * API calls to asynkor-server (dashboard API, not the MCP server).
+ * Uses the API key saved by `asynkor login` as a Bearer token — the backend's
+ * JwtAuthenticationFilter accepts any cf_live_… key as the user who created it.
+ */
+
+interface ApiContext {
+  apiUrl: string;
+  apiKey: string;
+  activeTeamSlug?: string;
+}
+
+function readApiContext(): ApiContext {
+  // Priority for api_url:
+  //   ASYNKOR_API_URL env → ~/.asynkor/config.json api_url → .asynkor.json api_url
+  //   → fallback: infer from ASYNKOR_SERVER_URL (mcp.* → api.*) → https://api.asynkor.com
+  const userConfigPath = path.join(os.homedir(), '.asynkor', 'config.json');
+  let userCfg: Record<string, string | undefined> = {};
+  if (fs.existsSync(userConfigPath)) {
+    try { userCfg = JSON.parse(fs.readFileSync(userConfigPath, 'utf8')); } catch {}
+  }
+
+  const apiKey = process.env.ASYNKOR_API_KEY?.trim() || userCfg.api_key || '';
+  if (!apiKey) {
+    console.error('Not signed in. Run `asynkor login` first, or set ASYNKOR_API_KEY.');
+    process.exit(1);
+  }
+  if (!apiKey.startsWith('cf_live_')) {
+    console.error('ASYNKOR_API_KEY must be a cf_live_… key (from the dashboard or `asynkor login`).');
+    process.exit(1);
+  }
+
+  let apiUrl = process.env.ASYNKOR_API_URL?.trim() || userCfg.api_url || '';
+  if (!apiUrl) {
+    const serverUrl = process.env.ASYNKOR_SERVER_URL?.trim() || userCfg.server_url || 'https://mcp.asynkor.com';
+    apiUrl = serverUrl.replace('mcp.', 'api.').replace(/\/$/, '');
+  }
+
+  return { apiUrl, apiKey, activeTeamSlug: userCfg.team };
+}
+
+async function apiFetch<T>(ctx: ApiContext, method: string, path: string, body?: unknown): Promise<T> {
+  const url = ctx.apiUrl.replace(/\/$/, '') + path;
+  const headers: Record<string, string> = {
+    'Authorization': `Bearer ${ctx.apiKey}`,
+    'Accept': 'application/json',
+  };
+  if (body !== undefined) headers['Content-Type'] = 'application/json';
+
+  const res = await fetch(url, {
+    method,
+    headers,
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+
+  const text = await res.text();
+  const data = text ? tryJson(text) : null;
+
+  if (!res.ok) {
+    const msg = (data && typeof data === 'object' && 'message' in data) ? (data as { message: string }).message : `HTTP ${res.status}`;
+    throw new Error(`${method} ${path} → ${res.status}: ${msg}`);
+  }
+  return (data ?? undefined) as T;
+}
+
+function tryJson(text: string): unknown {
+  try { return JSON.parse(text); } catch { return text; }
+}
+
+function resolveTeamSlug(flags: Record<string, string>, ctx: ApiContext): string {
+  const slug = flags['team'] || ctx.activeTeamSlug || resolveAllTeams().activeSlug;
+  if (!slug) {
+    console.error('No team specified. Pass --team <slug>, or set an active team via `asynkor teams switch`.');
+    process.exit(1);
+  }
+  return slug;
+}
+
+/**
+ * Parses "7d", "12h", "30m" into hours (integer).
+ * Returns undefined if input is empty; throws on malformed input.
+ */
+function parseDuration(raw: string | undefined): number | undefined {
+  if (!raw) return undefined;
+  const m = /^(\d+)(h|d|m)?$/i.exec(raw.trim());
+  if (!m) {
+    console.error(`Bad duration "${raw}". Use e.g. 24h, 7d, or a plain number (hours).`);
+    process.exit(1);
+  }
+  const n = parseInt(m[1], 10);
+  const unit = (m[2] || 'h').toLowerCase();
+  if (unit === 'd') return n * 24;
+  if (unit === 'h') return n;
+  // 'm' — minutes, round up to at least 1 hour
+  return Math.max(1, Math.round(n / 60));
+}
+
+async function cmdInvite(args: string[]): Promise<void> {
+  const sub = args[0];
+  if (!sub) {
+    console.error('Usage:');
+    console.error('  asynkor invite <email> [--role admin|member] [--team slug]');
+    console.error('  asynkor invite link [--expires 7d] [--max-claims N] [--label "..."] [--team slug]');
+    process.exit(1);
+  }
+
+  const ctx = readApiContext();
+
+  if (sub === 'link') {
+    const flags = parseFlags(args.slice(1));
+    const slug = resolveTeamSlug(flags, ctx);
+    const body: Record<string, unknown> = {};
+    if (flags['label']) body.label = flags['label'];
+    if (flags['max-claims']) {
+      const n = parseInt(flags['max-claims'], 10);
+      if (isNaN(n) || n < 1) { console.error('--max-claims must be a positive integer.'); process.exit(1); }
+      body.maxClaims = n;
+    }
+    const expiry = parseDuration(flags['expires']);
+    if (expiry !== undefined) body.expiryHours = expiry;
+
+    const link = await apiFetch<{ url: string; token: string; label: string | null; maxClaims: number; expiresAt: string | null }>(
+      ctx, 'POST', `/v1/teams/${encodeURIComponent(slug)}/join-links`, body,
+    );
+
+    console.log('');
+    console.log(link.url);
+    console.log('');
+    const bits: string[] = [];
+    if (link.label) bits.push(`label: ${link.label}`);
+    bits.push(`max claims: ${link.maxClaims}`);
+    bits.push(link.expiresAt ? `expires: ${link.expiresAt}` : 'no expiry');
+    console.log(bits.join('  ·  '));
+    return;
+  }
+
+  // Treat sub as the email to invite
+  const email = sub;
+  if (email.startsWith('--') || !email.includes('@')) {
+    console.error(`"${email}" is not a valid email. Did you mean \`asynkor invite link\`?`);
+    process.exit(1);
+  }
+  const flags = parseFlags(args.slice(1));
+  const slug = resolveTeamSlug(flags, ctx);
+  const role = flags['role'] || 'member';
+  if (!['admin', 'member'].includes(role)) {
+    console.error('--role must be "admin" or "member".');
+    process.exit(1);
+  }
+
+  await apiFetch<{ ok: boolean }>(
+    ctx, 'POST', `/v1/teams/${encodeURIComponent(slug)}/members/invite`, { email, role },
+  );
+  console.log(`Invite sent to ${email} as ${role} of "${slug}".`);
+}
+
+async function cmdKeys(args: string[]): Promise<void> {
+  const sub = args[0];
+  if (!sub || !['create', 'list', 'revoke'].includes(sub)) {
+    console.error('Usage:');
+    console.error('  asynkor keys list [--team slug]');
+    console.error('  asynkor keys create [--label "..."] [--team slug]');
+    console.error('  asynkor keys revoke <keyId> [--team slug]');
+    process.exit(1);
+  }
+
+  const ctx = readApiContext();
+
+  if (sub === 'list') {
+    const flags = parseFlags(args.slice(1));
+    const slug = resolveTeamSlug(flags, ctx);
+    const keys = await apiFetch<Array<{ id: string; label: string; keyPrefix: string; createdAt: string; lastUsedAt: string | null; revokedAt: string | null; scope?: string }>>(
+      ctx, 'GET', `/v1/teams/${encodeURIComponent(slug)}/api-keys`,
+    );
+    const active = keys.filter(k => !k.revokedAt);
+    if (active.length === 0) {
+      console.log('No active API keys.');
+      return;
+    }
+    console.log(`API keys for "${slug}" (${active.length} active):`);
+    for (const k of active) {
+      const prefix = k.keyPrefix || 'cf_live_…';
+      const scope = k.scope ? ` [${k.scope}]` : '';
+      const last = k.lastUsedAt ? `last used ${new Date(k.lastUsedAt).toISOString().slice(0, 10)}` : 'never used';
+      console.log(`  ${k.id.slice(0, 8)}  ${prefix}${scope}  — ${k.label || '(no label)'}  (${last})`);
+    }
+    return;
+  }
+
+  if (sub === 'create') {
+    const flags = parseFlags(args.slice(1));
+    const slug = resolveTeamSlug(flags, ctx);
+    const label = flags['label'] || `cli-${os.hostname()}`;
+    const body: Record<string, unknown> = { label, scope: 'team' };
+    const created = await apiFetch<{ id: string; key: string; label: string; keyPrefix: string }>(
+      ctx, 'POST', `/v1/teams/${encodeURIComponent(slug)}/api-keys`, body,
+    );
+    console.log('');
+    console.log(created.key);
+    console.log('');
+    console.log(`Label: ${created.label}  ·  id: ${created.id.slice(0, 8)}`);
+    console.log('Save this now — the raw key is only shown once.');
+    return;
+  }
+
+  if (sub === 'revoke') {
+    const keyId = args[1];
+    if (!keyId || keyId.startsWith('--')) {
+      console.error('Usage: asynkor keys revoke <keyId> [--team slug]');
+      process.exit(1);
+    }
+    const flags = parseFlags(args.slice(2));
+    const slug = resolveTeamSlug(flags, ctx);
+    await apiFetch<void>(ctx, 'DELETE', `/v1/teams/${encodeURIComponent(slug)}/api-keys/${encodeURIComponent(keyId)}`);
+    console.log(`Key ${keyId.slice(0, 8)} revoked.`);
+    return;
+  }
 }
 
 function printHelp(): void {
@@ -816,9 +1144,15 @@ Usage:
   asynkor setup <url>               Set up from a one-time join link (alias)
   asynkor status                    Show current team briefing
   asynkor teams                     List configured teams
-  asynkor teams add                 Add a team to config
-  asynkor teams remove <slug>       Remove a team from config
+  asynkor teams create <slug>       Create a new team on the backend + save api key
+  asynkor teams add                 Add an existing team to local config
+  asynkor teams remove <slug>       Remove a team from local config
   asynkor teams switch <slug>       Set the active team
+  asynkor invite <email>            Send an email invite to a team
+  asynkor invite link               Generate a shareable join-link URL
+  asynkor keys list                 List API keys for a team
+  asynkor keys create               Create a new API key (shown once)
+  asynkor keys revoke <keyId>       Revoke an API key
   asynkor help                      Show this help
 
 Supported IDEs (--ide flag):
@@ -842,6 +1176,24 @@ Flags for teams add:
   --name <name>           Display name
   --context <desc>        Brief description (helps AI choose the right team)
   --server-url <url>      Override server URL
+
+Flags for teams create:
+  --name "..."            Display name (defaults to slug)
+  --description "..."     Optional team description
+
+Flags for invite <email>:
+  --role admin|member     Role for the invitee (default: member)
+  --team <slug>           Target team (default: active team)
+
+Flags for invite link:
+  --expires 7d|12h|N      Link validity (d=days, h=hours, default: backend default)
+  --max-claims N          Seats the link can be used for (default: unlimited)
+  --label "..."           Human-readable label shown in the dashboard
+  --team <slug>           Target team (default: active team)
+
+Flags for keys create:
+  --label "..."           Human-readable label (default: cli-<hostname>)
+  --team <slug>           Target team (default: active team)
 
 Multi-team config (.asynkor.json):
   {
@@ -896,6 +1248,18 @@ switch (command) {
   case 'teams':
     cmdTeams(rest).catch((err) => {
       console.error(err);
+      process.exit(1);
+    });
+    break;
+  case 'invite':
+    cmdInvite(rest).catch((err) => {
+      console.error(err instanceof Error ? err.message : String(err));
+      process.exit(1);
+    });
+    break;
+  case 'keys':
+    cmdKeys(rest).catch((err) => {
+      console.error(err instanceof Error ? err.message : String(err));
       process.exit(1);
     });
     break;
