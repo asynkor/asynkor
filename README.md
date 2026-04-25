@@ -1,48 +1,92 @@
 <p align="center">
   <a href="https://asynkor.com">
-    <img src="media/asynkor-logo.png?v=2" width="160" alt="Asynkor" />
+    <img src="media/banner.png" alt="Asynkor — coordination layer for AI coding agents" />
   </a>
 </p>
 
 <p align="center">
-  <strong>File leasing for AI agent teams.</strong><br />
-  One MCP server. Any IDE. Zero merge conflicts.
+  <strong>The coordination layer for AI coding agents.</strong><br />
+  Git prevents conflicts at merge time. Asynkor prevents them at edit time.
 </p>
 
 <p align="center">
   <a href="https://www.npmjs.com/package/@asynkor/mcp"><img src="https://img.shields.io/npm/v/@asynkor/mcp?style=flat-square&color=0D7C72" alt="npm" /></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-blue?style=flat-square" alt="License" /></a>
   <a href="https://github.com/asynkor/asynkor/stargazers"><img src="https://img.shields.io/github/stars/asynkor/asynkor?style=flat-square" alt="Stars" /></a>
+  <a href="https://asynkor.com/docs"><img src="https://img.shields.io/badge/docs-asynkor.com-black?style=flat-square" alt="Docs" /></a>
+  <img src="https://img.shields.io/badge/status-production-3FB950?style=flat-square" alt="Status: production" />
 </p>
 
 <p align="center">
-  <a href="https://asynkor.com/docs">Documentation</a> |
-  <a href="https://asynkor.com">Website</a> |
-  <a href="#quickstart">Quickstart</a> |
-  <a href="#self-hosting">Self-hosting</a>
+  <a href="https://asynkor.com">Website</a> ·
+  <a href="https://asynkor.com/docs">Documentation</a> ·
+  <a href="#quickstart">Quickstart</a> ·
+  <a href="#self-hosting">Self-hosting</a> ·
+  <a href="https://github.com/asynkor/asynkor/discussions">Community</a>
 </p>
 
 ---
 
-## The problem
+<p align="center">
+  <img src="media/dashboard-hero.png" alt="Asynkor dashboard — live view of agents, leases, and team activity" />
+</p>
 
-Your team runs multiple AI agents in parallel — Claude Code, Cursor, Windsurf, Codex — across different machines. They rewrite each other's files, duplicate each other's work, and forget what the team decided yesterday.
+## What is Asynkor
 
-Git catches conflicts at merge time. Asynkor prevents them at edit time.
+Your team runs Claude Code on one laptop, Cursor on another, Windsurf on a third. The agents don't know about each other. They overwrite each other's edits, duplicate each other's work, and forget yesterday's decisions.
+
+Asynkor gives them one shared brain. Atomic file leases stop two agents from editing the same file. File snapshots flow across machines without `git pull`. Architectural decisions accrue in a memory every agent inherits. Run any MCP-compatible agent — Claude Code, Cursor, Windsurf, JetBrains, Codex.
+
+## See it in action
+
+### Live overview — who's working, on what, where
+
+<p align="center">
+  <img src="media/demo-overview.gif" alt="Live dashboard showing agents, active work, leases, and team activity" />
+</p>
+
+Connected agents, what each is doing, which files are leased, recent activity, the long-term project context — one screen, real-time.
+
+Put it on a second monitor. You'll see conflicts forming before they happen and notice when an agent goes silent.
+
+### Board — four ways to view the same work
+
+<p align="center">
+  <img src="media/demo-board.gif" alt="Board page cycling through Table, Board, Timeline, and Graph views" />
+</p>
+
+One Board page, four lenses. **Table** to scan everything in rows. **Board** for the live state (active / parked / leases). **Timeline** for who ran what when, with pan/zoom. **Graph** for the agent ↔ files constellation with conflict pulses.
+
+Each view answers a different question: *what's happening now*, *when did it happen*, *who's sharing files with whom*.
+
+### Everything else — context, rules, zones, members, audit, settings
+
+<p align="center">
+  <img src="media/demo-more.gif" alt="Walkthrough of Context, Rules, Memory, Zones, Members, API Keys, Audit Log, and Settings" />
+</p>
+
+The rest of the dashboard in one pass: **Context** (the long-term project doc), **Rules** (architectural guardrails), **Memory** (compounding team knowledge), **Zones** (protected paths), **Members** (invites and roles), **API Keys**, **Audit Log**, **Settings**. Every agent inherits all of it on the next session.
+
+Five minutes of setup, then every future agent on the team inherits all of it — no onboarding, no re-explaining.
+
+## When to use it
+
+- **Multi-machine teams** — two devs on separate laptops, both with agents editing the same repo. No more "I'll wait until you push."
+- **Solo devs across IDEs** — Claude Code at work, Cursor on the personal Mac, Windsurf in JetBrains. One brain across all three.
+- **Large agent fleets** — five or more concurrent agents on one codebase. Path-level leasing prevents the chaos that emerges past 3.
+- **Cross-repo orchestration** — agents on `frontend/` and `backend/` that need to know about each other's work without manual sync.
 
 ## How it works
-
-Agents connect to one shared MCP server. When an agent starts work, it **leases** the files it plans to touch. Other agents see the lease and wait. When the first agent finishes, it releases the lease and uploads a **snapshot** of the file content. The next agent gets the snapshot, writes it locally, and edits on top — no `git pull` needed, no merge conflicts.
 
 ```
 Agent A                          Asynkor                          Agent B
   │                                │                                │
   ├─ asynkor_start(paths=[api.ts]) │                                │
   │  ◄── lease acquired ──────────►│                                │
-  │                                │◄── asynkor_start(paths=[api.ts])
+  │                                │◄── asynkor_start(paths=[api.ts])│
   │                                │──► BLOCKED: api.ts leased      │
   │  ... editing api.ts ...        │                                │
-  │                                │     ... works on other files ..│
+  │                                │     ... works on other files...│
   ├─ asynkor_finish(snapshots)     │                                │
   │  ◄── leases released ────────►│                                │
   │                                │◄── asynkor_lease_wait(api.ts)  │
@@ -53,16 +97,18 @@ Agent A                          Asynkor                          Agent B
   │         Both commit. Zero conflicts.                            │
 ```
 
+When an agent starts work, it **leases** the files it plans to touch. Other agents wait. When the first agent finishes, it uploads a **snapshot** of the files it changed. The next agent receives the snapshot, writes it locally, and edits on top. No `git pull`. No merge conflicts.
+
 ## Features
 
-- **File leasing** — atomic Redis locks with 5-minute TTL. One agent edits a file at a time. Others wait automatically.
-- **Cross-machine file sync** — file content flows through the server. Two devs on separate laptops, zero merge conflicts.
-- **Parking and handoffs** — save work mid-session. Another agent resumes exactly where you left off via `handoff_id`.
-- **Overlap detection** — path-level and plan-text similarity. Catches conflicts before work begins, not at merge time.
-- **Compounding team memory** — architectural decisions, gotchas, conventions captured by agents and inherited by every future session.
-- **Protected zones** — mark sensitive code areas as warn, confirm, or block. Agents get guardrails automatically.
-- **Live dashboard** — real-time view of active agents, file leases, parked work, conflicts, and activity.
-- **Any IDE** — standard MCP protocol. Works with Claude Code, Cursor, Windsurf, VS Code, JetBrains, Zed, Codex CLI, and anything that supports MCP.
+- **File leasing** — atomic Redis Lua scripts, 5-minute TTL, auto-refreshed while alive.
+- **Cross-machine file sync** — file content rides through the server in `file_snapshots`. Two laptops, no `git pull`.
+- **Parking and handoffs** — pause mid-work, hand off to another agent or developer via `handoff_id`. Plan, progress, and decisions inherit.
+- **Overlap detection** — path-level + plan-text similarity. Catches collisions before edits begin.
+- **Compounding team memory** — agents `asynkor_remember()` what they learned. Every future session inherits it.
+- **Protected zones** — `warn`, `confirm`, or `block` on path globs. Guardrails for `migrations/`, `billing/`, secrets directories.
+- **Live dashboard** — `asynkor.com/dashboard` shows active agents, leases, parked work, conflicts, and activity in real time.
+- **Any MCP agent** — Claude Code, Cursor, Windsurf, VS Code Copilot, JetBrains, Zed, Codex CLI.
 
 ## Quickstart
 
@@ -103,7 +149,7 @@ Works with Cursor, Windsurf, VS Code (Copilot), JetBrains, Zed, Codex CLI, and a
 
 | Tool | Purpose |
 |------|---------|
-| `asynkor_briefing` | Get team state: active work, leases, parked sessions, memory, follow-ups |
+| `asynkor_briefing` | Team state: active work, leases, parked sessions, memory, follow-ups |
 | `asynkor_start` | Declare work + acquire file leases |
 | `asynkor_check` | Check rules, zones, leases for specific paths |
 | `asynkor_remember` | Save knowledge to the team brain |
@@ -111,10 +157,19 @@ Works with Cursor, Windsurf, VS Code (Copilot), JetBrains, Zed, Codex CLI, and a
 | `asynkor_park` | Pause work for another agent to resume |
 | `asynkor_lease_acquire` | Lease additional files mid-work |
 | `asynkor_lease_wait` | Wait for blocked files (25s, retryable) |
-| `asynkor_cancel` | Clean up stale/orphaned work |
-| `asynkor_context` | Read the long-term project context doc (versioned, owner-curated) |
+| `asynkor_cancel` | Clean up stale or orphaned work |
+| `asynkor_context` | Read the long-term project context (versioned, owner-curated) |
 | `asynkor_context_update` | Write a new version of the long-term context (atomic replace) |
 | `asynkor_switch_team` | Switch the active team (user-scoped API keys) |
+
+Full reference at [asynkor.com/docs](https://asynkor.com/docs#asynkor-briefing).
+
+## Built with
+
+- **Go** — MCP server, Lua scripts for atomic Redis ops, NATS pub/sub
+- **Redis** — coordination spine: leases, work state, file snapshots
+- **TypeScript** — local stdio↔HTTP+SSE proxy that ships as `@asynkor/mcp`
+- **MCP** — [Model Context Protocol](https://modelcontextprotocol.io/) so any compliant agent works out of the box
 
 ## Architecture
 
@@ -140,11 +195,11 @@ Agents (Claude Code, Cursor, Windsurf, Codex)
          sync)
 ```
 
-**Go MCP Server** — real-time coordination: file leasing (atomic Lua scripts), work tracking, overlap detection, team memory distribution, file snapshot sync.
+**Go MCP server** — real-time coordination. File leasing through atomic Lua scripts. Work tracking, overlap detection, team memory distribution, file snapshot sync.
 
-**TypeScript Client** — local proxy that bridges stdio (what IDEs speak) to HTTP+SSE (what the server speaks). Installed per-developer via npm.
+**TypeScript client** — local stdio↔HTTP+SSE proxy. Bridges what IDEs speak (stdio MCP) to what the server speaks (HTTP+SSE). One `npm install` per developer.
 
-**Redis** — the coordination spine. Leases, active work, sessions, file snapshots. All operations use atomic Lua scripts to prevent race conditions.
+**Redis** — the coordination spine. Leases, active work, sessions, file snapshots. All operations through atomic Lua scripts to eliminate race conditions.
 
 ## Self-hosting
 
@@ -159,7 +214,7 @@ docker compose up -d
 
 Services: Go MCP server, Redis, NATS. The server is stateless — Redis holds all coordination state.
 
-See [self-hosting docs](https://asynkor.com/docs#self-host-overview) for production deployment with TLS, backups, and monitoring.
+For production deployment with TLS, backups, and monitoring, see the [self-hosting guide](https://asynkor.com/docs#self-host-overview).
 
 ## Documentation
 
