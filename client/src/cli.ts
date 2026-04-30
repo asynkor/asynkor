@@ -26,11 +26,12 @@ type IdeType = 'claude-code' | 'vscode' | 'cursor' | 'windsurf' | 'zed' | 'jetbr
 const ASYNKOR_WORKFLOW = `You are connected to a team via Asynkor — the shared brain for agent orchestrators.
 
 Required workflow (every session, no exceptions):
-1. FIRST: call asynkor_briefing to see what teammates are working on.
+1. FIRST: call asynkor_briefing to see what teammates are working on, what they're stuck on, and any threads addressed to you.
 2. Before starting work: call asynkor_start with plan + paths (files you expect to touch). If the server returns an overlap or zone warning, stop and coordinate.
 3. Before editing files: call asynkor_check with the file paths. Respect any warnings.
-4. When you learn something important: call asynkor_remember to save it to the team brain.
-5. When done: call asynkor_finish with result, learnings, decisions, files_touched, and follow-ups.
+4. When you need a teammate's input: asynkor_ask to open an async thread; asynkor_inspect to read their live work without interrupting; asynkor_inbox / asynkor_thread / asynkor_reply to triage and respond.
+5. When you learn something important: call asynkor_remember to save it to the team brain.
+6. When done: call asynkor_finish with result, learnings, decisions, files_touched, and follow-ups.
 
 Every asynkor_finish and asynkor_remember enriches the team's shared brain. Be generous — your decisions persist beyond your session and are inherited by every future agent.`;
 
@@ -124,6 +125,32 @@ One memory per insight. Short, specific, actionable. The team brain compounds �
 
 This releases your leases and saves your context as a **handoff**. The parked work appears in the briefing with a \`handoff_id\` that another agent can use to resume.
 
+### 7. Coordinate with teammates — agent comms
+
+When file leases aren't enough — when you need to understand what a teammate is doing, or ask them a question, or share a decision — use the comms primitives. All async, all auto-approved.
+
+#### Inspect a teammate's live work
+
+\`asynkor_inspect(work_id)\` returns the full state of one work: plan, planned paths, files touched, learnings, decisions, parked notes, and the leases it holds. Read-only. Use it before:
+- Picking up parked work (so you know what you're inheriting)
+- Asking a question (so you don't ask something already in their notes)
+- Triaging a stale lease (so you know what they were doing)
+
+#### Ask a question — \`asynkor_ask\`
+
+Open a thread targeting:
+- \`work:<work_id>\` — narrowest, lands in that one session
+- \`host:<hostname>\` — durable across the developer's future sessions
+- \`team\` — broadcast, anyone replies
+
+The recipient sees it in their next briefing and inbox. **Carry on with other work** — replies come back via the briefing or \`asynkor_inbox\`. Don't block waiting; you'll get the answer on a future tool call.
+
+#### Triage your inbox
+
+Every briefing now includes top-3 inbox entries. Full list: \`asynkor_inbox\`. Read a thread: \`asynkor_thread(thread_id)\`. Reply: \`asynkor_reply(thread_id, body)\`. Close when answered: \`asynkor_reply(thread_id, body, close: "true")\`.
+
+**Promote durable answers to long-term context.** If a thread answer is an architectural decision (not just a one-off), don't let it die in a closed thread — call \`asynkor_context_update\` so future agents inherit it. Threads feed the brain; the brain is the source of truth.
+
 ### Quick reference
 
 | Tool | When | Key params |
@@ -136,7 +163,12 @@ This releases your leases and saves your context as a **handoff**. The parked wo
 | \`asynkor_lease_wait\` | File is leased by another agent | paths, timeout_seconds |
 | \`asynkor_finish\` | Work complete | result, learnings, decisions, files_touched, file_snapshots, followups |
 | \`asynkor_park\` | Work incomplete, save for later | progress, notes, learnings, decisions, files_touched |
-| \`asynkor_cancel\` | Clean up stale/orphaned work | work_id |`;
+| \`asynkor_cancel\` | Clean up stale/orphaned work | work_id |
+| \`asynkor_inspect\` | Read a teammate's live work state | work_id |
+| \`asynkor_ask\` | Open a thread to a teammate / host / team | target, topic, question, context_paths |
+| \`asynkor_inbox\` | List threads addressed to me | — |
+| \`asynkor_thread\` | Read full transcript | thread_id |
+| \`asynkor_reply\` | Append a reply (optionally close) | thread_id, body, close |`;
 
 const AUTO_APPROVE_TOOLS = [
   'mcp__asynkor__asynkor_briefing',
@@ -144,6 +176,7 @@ const AUTO_APPROVE_TOOLS = [
   'mcp__asynkor__asynkor_finish',
   'mcp__asynkor__asynkor_check',
   'mcp__asynkor__asynkor_remember',
+  'mcp__asynkor__asynkor_forget',
   'mcp__asynkor__asynkor_park',
   'mcp__asynkor__asynkor_lease_acquire',
   'mcp__asynkor__asynkor_lease_wait',
@@ -154,6 +187,13 @@ const AUTO_APPROVE_TOOLS = [
   // rewrites session-level active team; low-risk, making it prompt on every
   // call would defeat the "simpler team switching" point.
   'mcp__asynkor__asynkor_switch_team',
+  // agent-comms: read-only inspect, async messaging primitives. All low-risk
+  // — they read or append to a thread, no destructive operation.
+  'mcp__asynkor__asynkor_inspect',
+  'mcp__asynkor__asynkor_ask',
+  'mcp__asynkor__asynkor_inbox',
+  'mcp__asynkor__asynkor_thread',
+  'mcp__asynkor__asynkor_reply',
 ];
 
 const JoinLinkSchema = z.object({

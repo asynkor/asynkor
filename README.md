@@ -147,20 +147,30 @@ Works with Cursor, Windsurf, VS Code (Copilot), JetBrains, Zed, Codex CLI, and a
 
 ## MCP Tools
 
+**Coordination + history**
+
 | Tool | Purpose |
 |------|---------|
-| `asynkor_briefing` | Team state: active work, leases, parked sessions, memory, follow-ups |
+| `asynkor_briefing` | Team state: active work, leases, parked sessions, memory, follow-ups, inbox |
 | `asynkor_start` | Declare work + acquire file leases |
 | `asynkor_check` | Check rules, zones, leases for specific paths |
-| `asynkor_remember` | Save knowledge to the team brain |
+| `asynkor_remember` / `asynkor_forget` | Save / drop short-term staging memories |
 | `asynkor_finish` | Complete work, release leases, upload file snapshots |
 | `asynkor_park` | Pause work for another agent to resume |
-| `asynkor_lease_acquire` | Lease additional files mid-work |
-| `asynkor_lease_wait` | Wait for blocked files (25s, retryable) |
+| `asynkor_lease_acquire` / `asynkor_lease_wait` | Lease additional files mid-work / wait for blocked ones |
 | `asynkor_cancel` | Clean up stale or orphaned work |
-| `asynkor_context` | Read the long-term project context (versioned, owner-curated) |
-| `asynkor_context_update` | Write a new version of the long-term context (atomic replace) |
+| `asynkor_context` / `asynkor_context_update` | Read / atomically rewrite the long-term project doc |
 | `asynkor_switch_team` | Switch the active team (user-scoped API keys) |
+
+**Agent comms (v0.2 — async messaging between agents)**
+
+| Tool | Purpose |
+|------|---------|
+| `asynkor_inspect` | Read live state of one teammate's work without interrupting |
+| `asynkor_ask` | Open an async thread (work / host / team) |
+| `asynkor_inbox` | List threads addressed to me |
+| `asynkor_thread` | Read a thread's full transcript |
+| `asynkor_reply` | Append a reply (optionally close) |
 
 Full reference at [asynkor.com/docs](https://asynkor.com/docs#asynkor-briefing).
 

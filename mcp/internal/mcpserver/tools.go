@@ -278,7 +278,7 @@ func (s *Server) handleBriefing(ctx context.Context, _ mcp.CallToolRequest) (*mc
 		}
 		sb.WriteString(fmt.Sprintf("\nTeam memory (showing %d of %d):\n", limit, len(tc.Memories)))
 		for _, m := range tc.Memories[:limit] {
-			sb.WriteString(fmt.Sprintf("• %s\n", m.Content))
+			sb.WriteString(fmt.Sprintf("• [id %s] %s\n", m.ID, m.Content))
 			if len(m.Paths) > 0 {
 				sb.WriteString(fmt.Sprintf("  files: %s\n", strings.Join(m.Paths, ", ")))
 			}
@@ -286,6 +286,7 @@ func (s *Server) handleBriefing(ctx context.Context, _ mcp.CallToolRequest) (*mc
 				sb.WriteString(fmt.Sprintf("  tags: %s\n", strings.Join(m.Tags, ", ")))
 			}
 		}
+		sb.WriteString("\nMemory entries are short-term staging. If a learning is durable, asynkor_context_update merges it into the long-term project context — then asynkor_forget the staging entry by id.\n")
 	}
 
 	if len(tc.RecentWorks) > 0 {
@@ -332,6 +333,34 @@ func (s *Server) handleBriefing(ctx context.Context, _ mcp.CallToolRequest) (*mc
 				sb.WriteString(fmt.Sprintf("    Watch out: %s\n", f.WatchOut))
 			}
 		}
+	}
+
+	// Threaded messaging — surface anything addressed to me (work, host, or
+	// team broadcast). Top 3 only; full list via asynkor_inbox. Resolve
+	// my work_id via session lookup; falls back to "" which means we still
+	// see host- and team-scoped threads.
+	hostname := getHostname(ctx)
+	sessID := getSessionID(ctx)
+	var myWorkID string
+	if w, _ := s.works.GetBySession(ctx, team.TeamID, sessID); w != nil {
+		myWorkID = w.ID
+	}
+	if inbox, err := s.teamCtx.ThreadInbox(team.TeamID, myWorkID, hostname); err == nil && len(inbox) > 0 {
+		sb.WriteString(fmt.Sprintf("\nInbox — threads addressed to you (%d):\n", len(inbox)))
+		limit := len(inbox)
+		if limit > 3 {
+			limit = 3
+		}
+		for _, t := range inbox[:limit] {
+			scope := t.TargetKind + ":" + t.TargetValue
+			sb.WriteString(fmt.Sprintf("• [%s] %s — %s (from %s, %s)\n",
+				t.Status, t.Topic, scope, t.OpenerHost, relativeTime(t.UpdatedAt)))
+			sb.WriteString(fmt.Sprintf("  thread_id: %s\n", t.ID))
+		}
+		if len(inbox) > 3 {
+			sb.WriteString(fmt.Sprintf("  …and %d more — call asynkor_inbox for the full list.\n", len(inbox)-3))
+		}
+		sb.WriteString("Use asynkor_thread(thread_id) to read, asynkor_reply(thread_id, body[, close=true]) to respond.\n")
 	}
 
 	return mcp.NewToolResultText(sb.String()), nil
@@ -971,6 +1000,32 @@ func (s *Server) handleRemember(ctx context.Context, req mcp.CallToolRequest) (*
 	return toolJSON(map[string]any{
 		"ok":      true,
 		"message": "Memory saved. All teammates will see this in their next briefing.",
+	}), nil
+}
+
+func (s *Server) handleForget(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	if e := getAuthError(ctx); e != "" {
+		return toolError("unauthorized: " + e), nil
+	}
+	team := getTeam(ctx)
+
+	memoryID, err := req.RequireString("memory_id")
+	if err != nil {
+		return toolError("memory_id is required (find it in asynkor_briefing under 'Team memory' — the [id …] prefix on each entry)"), nil
+	}
+	memoryID = strings.TrimSpace(memoryID)
+	if !isValidUUID(memoryID) {
+		return toolError("memory_id must be a UUID — copy it from the [id …] prefix in asynkor_briefing output"), nil
+	}
+
+	if err := s.teamCtx.DeleteMemory(team.TeamID, memoryID); err != nil {
+		log.Printf("ERROR forget memory %s: %v", memoryID, err)
+		return toolError(fmt.Sprintf("failed to forget memory: %v", err)), nil
+	}
+
+	return toolJSON(map[string]any{
+		"ok":      true,
+		"message": fmt.Sprintf("Memory %s deleted. The team memory list shrinks by one — every future briefing reflects this.", memoryID),
 	}), nil
 }
 

@@ -64,13 +64,21 @@ Leases auto-expire after 5 minutes and are refreshed while your session is activ
 
 ### 5. Capture learnings — feed the team brain
 
-Call `asynkor_remember` whenever you discover something a future agent should know:
-- Architectural decisions and why they were made
-- Gotchas, non-obvious behavior, debugging discoveries
-- Patterns, conventions, file ownership
-- Business logic insights
+The team brain has **two stores**, not one:
 
-One memory per insight. Short, specific, actionable. The team brain compounds — but only if you write to it.
+1. **Long-term project context** — single versioned doc, edited via `asynkor_context_update`. Read it with `asynkor_context`. This is the canonical brain: architecture, conventions, durable gotchas, design rules. Every briefing returns the head version verbatim.
+2. **Memory entries** (`asynkor_remember` → surfaced as "Team memory" in the briefing) — append-only **staging** feed. Short-term insights, incident notes, in-progress decisions, debugging breadcrumbs.
+
+**Workflow rule.** Memory should NOT accumulate as a parallel knowledge base — that's the long-term doc's job. When you finish work:
+
+- If a learning is **durable** (architecture, gotcha, convention, design rule that future agents must know), do BOTH:
+  1. Merge it into the long-term context via `asynkor_context_update` (pass the FULL new content — versions are atomic).
+  2. Call `asynkor_forget(memory_id)` on any staging entry that's now redundant. The briefing surfaces memory IDs as `[id <uuid>]` on each entry — copy from there.
+- If a learning is **transient** (incident note for the current sprint, in-progress decision that won't matter in a week), leave it in `asynkor_remember` and let it age out.
+
+**While you work**, `asynkor_remember` is fine for capturing as you go — but at finish time, audit your own staging entries. If they're durable, promote-and-forget. If they're already covered by the long-term doc, just `asynkor_forget`. The team memory list should stay small (<10 entries) — if it doesn't, someone is hoarding instead of merging.
+
+One memory per insight. Short, specific, actionable.
 
 ### 6. End work — finish or park
 
@@ -81,6 +89,8 @@ One memory per insight. Short, specific, actionable. The team brain compounds �
 - `files_touched`: comma-separated list of files modified
 - `file_snapshots`: **REQUIRED for cross-machine coordination.** JSON object mapping each modified file path to its current content. Read each file you modified and include it: `{"src/api.ts": "<full file content>", ...}`. This lets agents on other machines get your version of the file directly from the server, so they can edit on top without conflicts.
 - `followups`: JSON array of tasks for teammates
+
+**Before calling finish**, apply the merge-and-clean rule from step 5: if any of your `learnings` / `decisions` are durable, push them to `asynkor_context_update` and `asynkor_forget` the matching staging memories. Don't leave the team memory list bloated.
 
 This releases all your leases, persists your work to the team history, and makes your learnings available to every future agent.
 
@@ -110,7 +120,9 @@ If the briefing shows multiple open follow-ups or parked work that can be done i
 | Tool | When | Key params |
 |------|------|------------|
 | `asynkor_briefing` | Session start | — |
-| `asynkor_remember` | Learn something | content, paths, tags |
+| `asynkor_context` / `asynkor_context_update` | Read or rewrite the long-term project doc | content, summary |
+| `asynkor_remember` | Stage a short-term insight | content, paths, tags |
+| `asynkor_forget` | Delete a staging memory after merging it (or as cleanup) | memory_id |
 | `asynkor_start` | Begin work | plan, paths, handoff_id, followup_id |
 | `asynkor_check` | Before editing files | paths |
 | `asynkor_lease_acquire` | Need additional files | paths |
@@ -118,3 +130,17 @@ If the briefing shows multiple open follow-ups or parked work that can be done i
 | `asynkor_finish` | Work complete | result, learnings, decisions, files_touched, followups |
 | `asynkor_park` | Work incomplete, save for later | progress, notes, learnings, decisions, files_touched |
 | `asynkor_cancel` | Clean up stale/orphaned work | work_id |
+| `asynkor_inspect` | Read a teammate's live work state without interrupting | work_id |
+| `asynkor_ask` | Open an async thread to a teammate (work / host / team) | target, topic, question, context_paths |
+| `asynkor_inbox` | List threads addressed to me | — |
+| `asynkor_thread` | Read full transcript | thread_id |
+| `asynkor_reply` | Append a reply (optionally close) | thread_id, body, close |
+
+### Agent comms — when leases aren't enough
+
+File leases stop two agents from editing the same file. **Threads** let them coordinate beyond that — async questions, decisions, hand-offs that need a back-and-forth. All async, all auto-approved.
+
+- **Inspect first, ask second.** `asynkor_inspect(work_id)` returns the full live state of one work — plan, planned paths, files touched, learnings, decisions, parked notes, leases held. Read this before opening a thread; the answer might already be in the metadata.
+- **Routing.** `asynkor_ask(target: ...)` accepts `work:<id>` (narrowest), `host:<name>` (durable across the developer's sessions), or `team` (broadcast).
+- **Don't block waiting.** Threads are async. Open one, then keep working. Replies surface in the next briefing's inbox section (top 3) and via `asynkor_inbox` (full list).
+- **Close when answered.** `asynkor_reply(thread_id, body, close: "true")` removes the thread from the team's open list. If the answer is a durable architectural decision, also call `asynkor_context_update` so future agents inherit it without re-asking — threads feed the brain; the brain is the source of truth.

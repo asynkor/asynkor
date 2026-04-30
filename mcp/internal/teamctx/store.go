@@ -279,6 +279,36 @@ func (s *Store) CreateMemory(teamID, content string, paths, tags []string, agent
 	return nil
 }
 
+func (s *Store) DeleteMemory(teamID, memoryID string) error {
+	req, err := http.NewRequest(http.MethodDelete,
+		fmt.Sprintf("%s/internal/teams/%s/memories/%s", s.javaURL, url.PathEscape(teamID), url.PathEscape(memoryID)),
+		nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("X-Internal-Token", s.internalToken)
+
+	resp, err := s.client.Do(req)
+	if err != nil {
+		return fmt.Errorf("delete memory: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusNotFound {
+		return fmt.Errorf("memory %s not found", memoryID)
+	}
+	if resp.StatusCode >= 300 {
+		b, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("delete memory %d: %s", resp.StatusCode, b)
+	}
+
+	s.mu.Lock()
+	delete(s.cache, teamID)
+	s.mu.Unlock()
+
+	return nil
+}
+
 func (s *Store) PersistWork(teamID string, w *work.Work) error {
 	followups := make([]map[string]any, len(w.Followups))
 	for i, f := range w.Followups {
@@ -372,6 +402,208 @@ type RelevantContext struct {
 	Decisions  []string             `json:"decisions,omitempty"`
 	Learnings  []string             `json:"learnings,omitempty"`
 	Followups  []PersistentFollowup `json:"followups,omitempty"`
+}
+
+// ----- Threads (agent-to-agent messaging) -----
+
+// AgentThread mirrors the Java AgentThread entity. Field names match the
+// Jackson serialization Java produces (default — camelCase JSON for getters,
+// snake_case where @Column already provides it).
+type AgentThread struct {
+	ID            string   `json:"id"`
+	TeamID        string   `json:"teamId"`
+	OpenerWorkID  string   `json:"openerWorkId,omitempty"`
+	OpenerHost    string   `json:"openerHost,omitempty"`
+	TargetKind    string   `json:"targetKind"`
+	TargetValue   string   `json:"targetValue"`
+	Topic         string   `json:"topic"`
+	Status        string   `json:"status"`
+	ContextPaths  []string `json:"contextPaths,omitempty"`
+	CreatedAt     string   `json:"createdAt"`
+	UpdatedAt     string   `json:"updatedAt"`
+	ClosedAt      string   `json:"closedAt,omitempty"`
+}
+
+type ThreadMessage struct {
+	ID           string `json:"id"`
+	ThreadID     string `json:"threadId"`
+	AuthorWorkID string `json:"authorWorkId,omitempty"`
+	AuthorHost   string `json:"authorHost,omitempty"`
+	Body         string `json:"body"`
+	CreatedAt    string `json:"createdAt"`
+}
+
+type ThreadWithMessages struct {
+	Thread   AgentThread     `json:"thread"`
+	Messages []ThreadMessage `json:"messages"`
+}
+
+func (s *Store) OpenThread(teamID, openerWorkID, openerHost, targetKind, targetValue, topic, body string, contextPaths []string) (*AgentThread, error) {
+	payload := map[string]any{
+		"opener_work_id": openerWorkID,
+		"opener_host":    openerHost,
+		"target_kind":    targetKind,
+		"target_value":   targetValue,
+		"topic":          topic,
+		"body":           body,
+		"context_paths":  contextPaths,
+	}
+	data, _ := json.Marshal(payload)
+
+	req, err := http.NewRequest(http.MethodPost,
+		fmt.Sprintf("%s/internal/teams/%s/threads", s.javaURL, url.PathEscape(teamID)),
+		bytes.NewReader(data))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Internal-Token", s.internalToken)
+
+	resp, err := s.client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("open thread: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 300 {
+		b, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("open thread %d: %s", resp.StatusCode, b)
+	}
+
+	var t AgentThread
+	if err := json.NewDecoder(resp.Body).Decode(&t); err != nil {
+		return nil, fmt.Errorf("decode thread: %w", err)
+	}
+	return &t, nil
+}
+
+func (s *Store) ThreadInbox(teamID, workID, hostname string) ([]AgentThread, error) {
+	q := url.Values{}
+	if workID != "" {
+		q.Set("work_id", workID)
+	}
+	if hostname != "" {
+		q.Set("host", hostname)
+	}
+	u := fmt.Sprintf("%s/internal/teams/%s/threads/inbox?%s",
+		s.javaURL, url.PathEscape(teamID), q.Encode())
+
+	req, err := http.NewRequest(http.MethodGet, u, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("X-Internal-Token", s.internalToken)
+
+	resp, err := s.client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("thread inbox: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("thread inbox %d: %s", resp.StatusCode, b)
+	}
+
+	var threads []AgentThread
+	if err := json.NewDecoder(resp.Body).Decode(&threads); err != nil {
+		return nil, fmt.Errorf("decode threads: %w", err)
+	}
+	return threads, nil
+}
+
+func (s *Store) GetThread(teamID, threadID string) (*ThreadWithMessages, error) {
+	req, err := http.NewRequest(http.MethodGet,
+		fmt.Sprintf("%s/internal/teams/%s/threads/%s",
+			s.javaURL, url.PathEscape(teamID), url.PathEscape(threadID)), nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("X-Internal-Token", s.internalToken)
+
+	resp, err := s.client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("get thread: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusNotFound {
+		return nil, fmt.Errorf("thread %s not found", threadID)
+	}
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("get thread %d: %s", resp.StatusCode, b)
+	}
+
+	var twm ThreadWithMessages
+	if err := json.NewDecoder(resp.Body).Decode(&twm); err != nil {
+		return nil, fmt.Errorf("decode thread: %w", err)
+	}
+	return &twm, nil
+}
+
+func (s *Store) ReplyThread(teamID, threadID, authorWorkID, authorHost, body string, close bool) (*ThreadMessage, error) {
+	payload := map[string]any{
+		"author_work_id": authorWorkID,
+		"author_host":    authorHost,
+		"body":           body,
+		"close":          close,
+	}
+	data, _ := json.Marshal(payload)
+
+	req, err := http.NewRequest(http.MethodPost,
+		fmt.Sprintf("%s/internal/teams/%s/threads/%s/messages",
+			s.javaURL, url.PathEscape(teamID), url.PathEscape(threadID)),
+		bytes.NewReader(data))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Internal-Token", s.internalToken)
+
+	resp, err := s.client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("reply thread: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 300 {
+		b, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("reply thread %d: %s", resp.StatusCode, b)
+	}
+
+	var msg ThreadMessage
+	if err := json.NewDecoder(resp.Body).Decode(&msg); err != nil {
+		return nil, fmt.Errorf("decode reply: %w", err)
+	}
+	return &msg, nil
+}
+
+func (s *Store) CloseThread(teamID, threadID string) (*AgentThread, error) {
+	req, err := http.NewRequest(http.MethodPost,
+		fmt.Sprintf("%s/internal/teams/%s/threads/%s/close",
+			s.javaURL, url.PathEscape(teamID), url.PathEscape(threadID)), nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("X-Internal-Token", s.internalToken)
+
+	resp, err := s.client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("close thread: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 300 {
+		b, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("close thread %d: %s", resp.StatusCode, b)
+	}
+
+	var t AgentThread
+	if err := json.NewDecoder(resp.Body).Decode(&t); err != nil {
+		return nil, fmt.Errorf("decode thread: %w", err)
+	}
+	return &t, nil
 }
 
 func (s *Store) GetRelevantContext(teamID string, paths []string) (*RelevantContext, error) {

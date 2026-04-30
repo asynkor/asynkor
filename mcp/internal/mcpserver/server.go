@@ -325,6 +325,17 @@ func (s *Server) registerTools(mcpServer *server.MCPServer) {
 	)
 
 	mcpServer.AddTool(
+		mcp.NewTool("asynkor_forget",
+			mcp.WithDescription("Delete a memory entry from the team's staging feed. Use this AFTER you've merged a durable insight into the long-term project context (via asynkor_context_update) — staging memories should not accumulate as a parallel knowledge base. Memory IDs are surfaced in asynkor_briefing under 'Team memory' as the [id …] prefix on each entry."),
+			mcp.WithString("memory_id",
+				mcp.Description("UUID of the memory to delete. Copy it from the [id …] prefix on the entry in asynkor_briefing."),
+				mcp.Required(),
+			),
+		),
+		s.handleForget,
+	)
+
+	mcpServer.AddTool(
 		mcp.NewTool("asynkor_finish",
 			mcp.WithDescription("Declare the completion of your work. Summarise what you actually did and list any follow-up actions that teammates should know about. Follow-ups can be anything: a task to finish, something to review, a conversation to have, something to monitor — anything connected to this work."),
 			mcp.WithString("work_id",
@@ -446,6 +457,80 @@ func (s *Server) registerTools(mcpServer *server.MCPServer) {
 			),
 		),
 		s.handleSwitchTeam,
+	)
+
+	// ----- Agent-to-agent comms (inspect + threaded messaging) -----
+
+	mcpServer.AddTool(
+		mcp.NewTool("asynkor_inspect",
+			mcp.WithDescription("Read the live state of one teammate's work — plan, planned paths, files touched, learnings, decisions, parked notes, and the file leases they currently hold. Use this when you want to understand what another agent is doing without interrupting them. Read-only. work_id comes from asynkor_briefing (active work) or the handoff_id of parked work."),
+			mcp.WithString("work_id",
+				mcp.Description("UUID of the work to inspect. Find it in asynkor_briefing under 'Active work' or as 'handoff_id' under 'Parked work'."),
+				mcp.Required(),
+			),
+			mcp.WithReadOnlyHintAnnotation(true),
+		),
+		s.handleInspect,
+	)
+
+	mcpServer.AddTool(
+		mcp.NewTool("asynkor_ask",
+			mcp.WithDescription("Open a thread to ask a teammate's agent a question. Async — the answer comes back when the other side replies (next time their developer prompts them, or via the dashboard). Use this instead of guessing about decisions made elsewhere, or to coordinate before stepping on shared files. Closing a thread when it's answered keeps the team inbox tidy."),
+			mcp.WithString("target",
+				mcp.Description("Who to ask. One of: 'work:<work_id>' (specific session — most precise), 'host:<hostname>' (a developer; survives across their sessions), or 'team' (broadcast — any agent can reply)."),
+				mcp.Required(),
+			),
+			mcp.WithString("topic",
+				mcp.Description("Short subject line (≤200 chars). E.g. 'JWT rotation strategy' or 'Why argon2 over bcrypt?'"),
+				mcp.Required(),
+			),
+			mcp.WithString("question",
+				mcp.Description("Your question, in your own words (≤8000 chars). Be specific — include enough context that the recipient can answer without a second round-trip."),
+				mcp.Required(),
+			),
+			mcp.WithString("context_paths",
+				mcp.Description("Optional comma-separated file paths the question is about, e.g. 'src/auth/jwt.ts'. Helps the recipient (and the dashboard) locate the relevant code."),
+			),
+		),
+		s.handleAsk,
+	)
+
+	mcpServer.AddTool(
+		mcp.NewTool("asynkor_inbox",
+			mcp.WithDescription("List open threads addressed to you (your work_id, your host, or broadcast to the team). The briefing already includes a summary; use this when you want the full list of pending threads to triage."),
+			mcp.WithReadOnlyHintAnnotation(true),
+		),
+		s.handleInbox,
+	)
+
+	mcpServer.AddTool(
+		mcp.NewTool("asynkor_thread",
+			mcp.WithDescription("Read the full transcript of one thread — every message in order, with author host and timestamps. Use after asynkor_inbox flagged a thread you want to engage with."),
+			mcp.WithString("thread_id",
+				mcp.Description("UUID of the thread (from asynkor_inbox or the briefing)."),
+				mcp.Required(),
+			),
+			mcp.WithReadOnlyHintAnnotation(true),
+		),
+		s.handleThread,
+	)
+
+	mcpServer.AddTool(
+		mcp.NewTool("asynkor_reply",
+			mcp.WithDescription("Append a message to an existing thread. Set close='true' when the question is fully answered so the thread leaves the team's open-thread list. If the answer is a durable architectural decision, also call asynkor_context_update so future agents inherit it without re-asking."),
+			mcp.WithString("thread_id",
+				mcp.Description("UUID of the thread to reply to."),
+				mcp.Required(),
+			),
+			mcp.WithString("body",
+				mcp.Description("Your message (≤8000 chars)."),
+				mcp.Required(),
+			),
+			mcp.WithString("close",
+				mcp.Description("Pass 'true' to close the thread after this message. Default: leave open."),
+			),
+		),
+		s.handleReply,
 	)
 }
 

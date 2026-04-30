@@ -49,22 +49,33 @@ ASYNKOR_API_KEY=cf_live_... npx -y @asynkor/mcp init
 
 ## MCP tool surface
 
-Twelve tools. Every agent connected to the server can call them. Once your IDE is wired up, these are auto-approved by default (via `.claude/settings.json` for Claude Code; similar settings for other IDEs).
+Eighteen tools. Every agent connected to the server can call them. Once your IDE is wired up, all but `asynkor_context_update` are auto-approved by default (the long-term doc is owner-reviewed).
+
+**Coordination + history**
 
 | Tool | What it does |
 |------|--------------|
-| `asynkor_briefing` | Team state at session start — who is active, what was recently shipped, what follow-ups are open, applicable rules, memories, zones, and context. |
+| `asynkor_briefing` | Team state at session start — who is active, what was recently shipped, what follow-ups are open, applicable rules, memories, zones, context, and inbox top-3. |
 | `asynkor_start` | Declare the work you're about to do. Acquires file leases on declared paths, runs overlap detection, can resume a parked session via `handoff_id` or pick up an open `followup_id`. |
 | `asynkor_check` | Before an edit, check for active overlaps, applicable rules, protected zones, and relevant team memories on specific paths. Read-only. |
 | `asynkor_lease_acquire` | Acquire leases on additional paths mid-session (paths not declared in your initial `asynkor_start`). |
 | `asynkor_lease_wait` | Block up to 25–30s waiting for a leased path to free. Returns `still_blocked` if the lease holder outlasts the window so you can work on other files and retry. |
-| `asynkor_remember` | Save knowledge to the team brain — architectural decisions, gotchas, conventions. Tagged + path-scoped. Future agents see it during `asynkor_briefing`. |
+| `asynkor_remember` / `asynkor_forget` | Save / drop short-term staging memories. Promote durable ones to long-term context. |
 | `asynkor_finish` | Complete work. Uploads result, learnings, decisions, file snapshots (critical for cross-machine handoffs), follow-ups. Releases leases. |
 | `asynkor_park` | Save incomplete work for another agent to resume. Stores progress, notes, learnings, decisions. Returns a `handoff_id` that appears in the next briefing. |
 | `asynkor_cancel` | Clean up stale or orphaned work (disconnected sessions holding leases). Requires a `work_id` from the briefing. |
-| `asynkor_context` | Read the long-term team context document (single versioned markdown, owner-curated). |
-| `asynkor_context_update` | Write a new version of the long-term context. Versions are atomic — always pass the full new content, not a diff. |
+| `asynkor_context` / `asynkor_context_update` | Read / atomically rewrite the long-term project doc. |
 | `asynkor_switch_team` | Switch the active team for a user-scoped API key, or confirm the current team. |
+
+**Agent comms (v0.2 — async messaging between agents)**
+
+| Tool | What it does |
+|------|--------------|
+| `asynkor_inspect` | Read-only snapshot of one teammate's live work — plan, planned paths, files touched, learnings, decisions, parked notes, and the file leases they hold. |
+| `asynkor_ask` | Open an async thread targeting `work:<id>` (a specific session), `host:<name>` (a developer), or `team` (broadcast). Recipient sees it on their next briefing. |
+| `asynkor_inbox` | List threads addressed to me — my work, my host, or team broadcasts. |
+| `asynkor_thread` | Read the full transcript of one thread. |
+| `asynkor_reply` | Append a reply. Pass `close: "true"` when the question is fully answered. |
 
 Full reference with inputs, outputs, and examples: https://asynkor.com/docs
 
