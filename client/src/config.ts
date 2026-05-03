@@ -131,6 +131,35 @@ export function initConfig(options: { apiKey: string; serverUrl?: string; team?:
 
   const target = path.join(process.cwd(), '.asynkor.json');
   fs.writeFileSync(target, JSON.stringify(config, null, 2) + '\n', { mode: 0o600 });
+
+  // Mirror to ~/.asynkor/config.json so the proxy works system-wide — even
+  // when started from a directory without .asynkor.json (e.g. user-scope
+  // `claude mcp add` from any cwd, git worktrees that diverged from the
+  // init root, etc.). Per-project .asynkor.json still takes priority.
+  writeUserConfig({ apiKey: options.apiKey, serverUrl: options.serverUrl, team: options.team });
+}
+
+export function writeUserConfig(options: { apiKey: string; serverUrl?: string; team?: string }): void {
+  const userDir = path.join(os.homedir(), '.asynkor');
+  const userPath = path.join(userDir, 'config.json');
+
+  let existing: AsynkorJson = {};
+  if (fs.existsSync(userPath)) {
+    try { existing = JSON.parse(fs.readFileSync(userPath, 'utf-8')); } catch { /* corrupt or unreadable, overwrite */ }
+  }
+
+  const merged: AsynkorJson = {
+    ...existing,
+    api_key: options.apiKey,
+    server_url: options.serverUrl || existing.server_url || 'https://mcp.asynkor.com',
+  };
+  if (options.team) {
+    merged.team = options.team;
+    merged.active_team = options.team;
+  }
+
+  try { fs.mkdirSync(userDir, { recursive: true, mode: 0o700 }); } catch { /* exists */ }
+  fs.writeFileSync(userPath, JSON.stringify(merged, null, 2) + '\n', { mode: 0o600 });
 }
 
 function parseJsonTeams(json: AsynkorJson, serverUrlFallback: string): AsynkorTeam[] {
@@ -183,7 +212,11 @@ export function resolveAllTeams(): MultiTeamConfig {
     teams = parseJsonTeams(userConfig, defaultServerUrl);
   }
 
-  // If no teams[] array, fall back to single api_key → synthetic "default" team
+  // If no teams[] array, fall back to single api_key → synthetic "default" team.
+  // Slug priority must include ASYNKOR_TEAM env so a session that sets both
+  // ASYNKOR_API_KEY+ASYNKOR_TEAM ends up with a team whose slug matches the
+  // active_team validation below (otherwise activeSlug='40outof40' won't find
+  // the synthesized 'default' team and the proxy thinks it has no key).
   if (teams.length === 0) {
     const apiKey =
       process.env.ASYNKOR_API_KEY ||
@@ -193,7 +226,7 @@ export function resolveAllTeams(): MultiTeamConfig {
 
     if (apiKey) {
       teams = [{
-        slug: fileConfig.team || userConfig.team || 'default',
+        slug: process.env.ASYNKOR_TEAM || fileConfig.team || userConfig.team || 'default',
         apiKey,
         serverUrl: defaultServerUrl,
         refreshToken: fileConfig.refresh_token || userConfig.refresh_token,

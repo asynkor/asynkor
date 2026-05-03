@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
-import { loadConfig, resolveConfig, resolveAllTeams, initConfig, addTeamToConfig, removeTeamFromConfig, ConfigError } from './config.js';
+import { loadConfig, resolveConfig, resolveAllTeams, initConfig, addTeamToConfig, removeTeamFromConfig, writeUserConfig, ConfigError } from './config.js';
+import { installAllIdes, printInstallSummary } from './install.js';
 import { AsynkorMcpProxy } from './proxy.js';
 import readline from 'node:readline';
 import fs from 'node:fs';
@@ -616,10 +617,11 @@ async function cmdInit(args: string[]): Promise<void> {
     console.log('Asynkor setup (from environment)');
     console.log('─────────────────────────────────────');
     console.log('✓ .asynkor.json created');
+    console.log('✓ ~/.asynkor/config.json mirrored (works system-wide, any cwd)');
     console.log('✓ .claude/settings.json updated (all asynkor tools auto-approved)');
     console.log('✓ CLAUDE.md updated with Asynkor instructions');
-    console.log('\nAdd to Claude Code:');
-    console.log('  claude mcp add asynkor -- npx @asynkor/mcp start');
+    console.log('\nAdd to Claude Code (one-shot, works from any project):');
+    console.log('  claude mcp add --scope user asynkor -- npx @asynkor/mcp start');
     return;
   }
 
@@ -650,10 +652,11 @@ async function cmdInit(args: string[]): Promise<void> {
   writeClaudeMd(ASYNKOR_CLAUDE_MD);
 
   console.log('\n✓ .asynkor.json created');
+  console.log('✓ ~/.asynkor/config.json mirrored (works system-wide, any cwd)');
   console.log('✓ .claude/settings.json updated (all asynkor tools auto-approved)');
   console.log('✓ CLAUDE.md updated with Asynkor instructions');
-  console.log('\nAdd to Claude Code:');
-  console.log('  claude mcp add asynkor -- npx @asynkor/mcp start');
+  console.log('\nAdd to Claude Code (one-shot, works from any project):');
+  console.log('  claude mcp add --scope user asynkor -- npx @asynkor/mcp start');
 }
 
 async function setupFromJoinLink(url: string): Promise<void> {
@@ -782,6 +785,10 @@ async function cmdLogin(args: string[]): Promise<void> {
   if (team) existing.team = team;
   if (refreshToken) existing.refresh_token = refreshToken;
 
+  // Set both `team` and `active_team` so the proxy's slug-validation step doesn't
+  // null out activeSlug when there's only one team in the user's config.
+  if (team) existing.active_team = team;
+
   fs.writeFileSync(configPath, JSON.stringify(existing, null, 2) + '\n', { mode: 0o600 });
 
   console.log('');
@@ -790,9 +797,61 @@ async function cmdLogin(args: string[]): Promise<void> {
   if (refreshToken) {
     console.log('Refresh token saved — expired keys will be auto-refreshed.');
   }
+
+  // Auto-run the system-wide IDE install so a fresh `asynkor login` is the only
+  // command a user needs. They can pass `--no-install` if they want to opt out.
+  const skipInstall = flags['no-install'] !== undefined && flags['no-install'] !== 'false';
+  if (skipInstall) {
+    console.log('');
+    console.log('Skipped IDE install (--no-install). Run `asynkor install` later to wire it up.');
+    return;
+  }
+
   console.log('');
-  console.log('Next steps:');
-  console.log('  claude mcp add asynkor -- npx @asynkor/mcp start');
+  const summary = installAllIdes(apiKey, team || undefined);
+  printInstallSummary(summary);
+}
+
+async function cmdInstall(args: string[]): Promise<void> {
+  const flags = parseFlags(args);
+  const apiKey =
+    (typeof flags['api-key'] === 'string' ? flags['api-key'].trim() : '') ||
+    process.env.ASYNKOR_API_KEY?.trim() ||
+    '';
+
+  // Fall back to the user-config api_key if no flag/env passed. Keeps the
+  // bare `asynkor install` ergonomic after `asynkor login`.
+  let resolvedKey = apiKey;
+  let resolvedTeam: string | undefined =
+    (typeof flags['team'] === 'string' ? flags['team'].trim() : undefined) ||
+    process.env.ASYNKOR_TEAM?.trim();
+
+  if (!resolvedKey) {
+    const userConfigPath = path.join(os.homedir(), '.asynkor', 'config.json');
+    if (fs.existsSync(userConfigPath)) {
+      try {
+        const userCfg = JSON.parse(fs.readFileSync(userConfigPath, 'utf-8')) as Record<string, unknown>;
+        if (typeof userCfg.api_key === 'string') resolvedKey = userCfg.api_key;
+        if (!resolvedTeam) {
+          if (typeof userCfg.active_team === 'string') resolvedTeam = userCfg.active_team;
+          else if (typeof userCfg.team === 'string') resolvedTeam = userCfg.team;
+        }
+      } catch { /* malformed user config, ignore */ }
+    }
+  }
+
+  if (!resolvedKey) {
+    console.error('No API key found. Either:');
+    console.error('  • Run `asynkor login` (recommended) to sign in via browser');
+    console.error('  • Or pass --api-key cf_live_... / set ASYNKOR_API_KEY');
+    process.exit(1);
+  }
+
+  // Make sure the user-config exists so the proxy can find the key from any cwd.
+  writeUserConfig({ apiKey: resolvedKey, team: resolvedTeam });
+
+  const summary = installAllIdes(resolvedKey, resolvedTeam);
+  printInstallSummary(summary);
 }
 
 async function cmdStatus(): Promise<void> {
@@ -1176,10 +1235,12 @@ function printHelp(): void {
 @asynkor/mcp — Asynkor MCP client
 
 Usage:
-  asynkor login                     Sign in via browser and get your API key automatically
-  asynkor start [flags]             Start the MCP proxy server
-  asynkor init                      Set up .asynkor.json (interactive, or non-interactive if ASYNKOR_API_KEY is set)
-  asynkor init --ide <name>         Set up for a specific IDE
+  asynkor login                     Sign in via browser, save your key, and auto-install into every IDE
+  asynkor login --no-install        Sign in but skip the system-wide IDE install step
+  asynkor install                   Detect every IDE on the machine and register Asynkor MCP (idempotent)
+  asynkor start [flags]             Start the MCP proxy server (what your IDE actually launches)
+  asynkor init                      Project-scope setup: .asynkor.json + per-IDE config in cwd
+  asynkor init --ide <name>         Project-scope setup for one specific IDE
   asynkor init --link <url>         Set up from a one-time join link
   asynkor setup <url>               Set up from a one-time join link (alias)
   asynkor status                    Show current team briefing
@@ -1269,6 +1330,12 @@ switch (command) {
     break;
   case 'login':
     cmdLogin(rest).catch((err) => {
+      console.error(err);
+      process.exit(1);
+    });
+    break;
+  case 'install':
+    cmdInstall(rest).catch((err) => {
       console.error(err);
       process.exit(1);
     });

@@ -23,27 +23,36 @@ This package (`@asynkor/mcp`) is the piece that runs on your machine. It proxies
 
 ## Quickstart
 
-```bash
-# 1. Get an API key at https://asynkor.com (free for solo developers and small teams)
+One command. Auto-detects every IDE on the machine (Claude Code, Cursor, Windsurf, Zed, VS Code, Codex CLI) and wires Asynkor MCP into each one's user-scope config.
 
-# 2. In your project directory:
+```bash
+npx -y @asynkor/mcp login
+```
+
+That's it. The command opens your browser to sign in, saves the API key to `~/.asynkor/config.json`, and runs `asynkor install` automatically. Restart any open editor afterwards.
+
+### Already have an API key?
+
+```bash
+ASYNKOR_API_KEY=cf_live_... npx -y @asynkor/mcp install
+```
+
+Same effect, no browser. Useful for CI, agents installing on behalf of a user, or pasting a key from the dashboard.
+
+### Installed a new IDE later?
+
+Re-run `asynkor install`. It picks up the new IDE and registers Asynkor in it. Existing IDEs see no change — the command is idempotent.
+
+### Per-project config (optional)
+
+If you want a project-scoped `.asynkor.json` + `CLAUDE.md` + per-IDE config inside one repo, use `init` instead:
+
+```bash
+cd your-project
 ASYNKOR_API_KEY=cf_live_... npx @asynkor/mcp init
-
-# 3. Register the MCP server with Claude Code (once per machine):
-claude mcp add -s user asynkor -- npx @asynkor/mcp start
-
-# 4. Restart Claude Code. Every session now starts with a team briefing.
 ```
 
-For Cursor, Windsurf, Zed, JetBrains, and others, replace step 3 with the corresponding registration — `asynkor init --ide <name>` writes the config for you. See [Supported IDEs](#supported-ides) below.
-
-### Non-interactive mode
-
-If `ASYNKOR_API_KEY` is set in the environment, `init` runs without prompting — useful for agents setting up Asynkor on behalf of a developer, or for CI.
-
-```bash
-ASYNKOR_API_KEY=cf_live_... npx -y @asynkor/mcp init
-```
+Most users want `login`/`install` (system-wide). Use `init` only when one project needs different team credentials than your default.
 
 ---
 

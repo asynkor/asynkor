@@ -1,6 +1,6 @@
 {
   "name": "@asynkor/mcp",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "mcpName": "io.github.asynkor/asynkor",
   "description": "Asynkor MCP client — real-time agent coordination for AI coding teams",
   "license": "MIT",

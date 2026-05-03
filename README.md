@@ -112,22 +112,33 @@ When an agent starts work, it **leases** the files it plans to touch. Other agen
 
 ## Quickstart
 
-Two commands. Works with any MCP-compatible agent.
+One command. Auto-detects every IDE on your machine and wires Asynkor MCP into each.
 
 ```bash
-# 1. Initialize in your project (prompts for API key)
-npx @asynkor/mcp init
-
-# 2. Register the MCP server with your agent (Claude Code example)
-claude mcp add asynkor -- npx @asynkor/mcp start
+npx -y @asynkor/mcp login
 ```
 
-Restart your editor. From the next session, every agent on the team shares one brain.
+Opens your browser, signs you in, and runs `asynkor install` automatically — registering Asynkor in Claude Code, Cursor, Windsurf, Zed, VS Code, and Codex CLI (whichever are installed). Restart your editor afterwards.
+
+Already have an API key from the dashboard:
+
+```bash
+ASYNKOR_API_KEY=cf_live_... npx -y @asynkor/mcp install
+```
+
+Installed a new IDE later? Re-run `asynkor install` — idempotent, picks up the new IDE without touching the others.
 
 <details>
-<summary><strong>Other IDEs</strong></summary>
+<summary><strong>Manual / project-scope setup</strong></summary>
 
-Add to your agent's MCP config:
+For project-scoped config (`.asynkor.json` + `CLAUDE.md` + per-IDE config inside one repo):
+
+```bash
+cd your-project
+ASYNKOR_API_KEY=cf_live_... npx @asynkor/mcp init
+```
+
+Or wire any MCP-compatible agent manually:
 
 ```json
 {
@@ -141,7 +152,7 @@ Add to your agent's MCP config:
 }
 ```
 
-Works with Cursor, Windsurf, VS Code (Copilot), JetBrains, Zed, Codex CLI, and any MCP-compatible agent.
+Works with Cursor, Windsurf, VS Code (Copilot), JetBrains, Zed, Codex CLI, Trae, Antigravity, and any MCP-compatible agent.
 
 </details>
 
